@@ -1,0 +1,13 @@
+[package]
+name = "rustree"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.6.1", features = ["derive"] }
+ratatui = "0.29"
+rayon = "1.10"
+trash = "5"
+
+[profile.release]
+lto = true

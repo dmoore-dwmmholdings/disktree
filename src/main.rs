@@ -1,0 +1,103 @@
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, mpsc};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use clap::Parser;
+use ratatui::DefaultTerminal;
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+
+use rustree::app::App;
+use rustree::index::{self, ScanProgress, Tree};
+use rustree::ui;
+
+#[derive(Parser, Debug)]
+#[command(name = "rustree", version, about = "A simple TUI based file size viewer")]
+struct Args {
+    /// Initial path, speeds up invocation
+    #[arg(short, long)]
+    path: Option<String>,
+}
+
+fn main() -> io::Result<()> {
+    let args = Args::parse();
+    let path = PathBuf::from(args.path.unwrap_or_else(|| "C:\\".to_owned()));
+    if !path.is_dir() {
+        eprintln!("'{}' is not a directory", path.display());
+        std::process::exit(1);
+    }
+
+    let mut terminal = ratatui::init();
+    let result = run(&mut terminal, path);
+    ratatui::restore();
+    result
+}
+
+fn run(terminal: &mut DefaultTerminal, path: PathBuf) -> io::Result<()> {
+    loop {
+        let Some(tree) = run_scan(terminal, &path)? else {
+            return Ok(());
+        };
+        let mut app = App::new(tree);
+        run_browse(terminal, &mut app)?;
+        if !app.rescan {
+            return Ok(());
+        }
+    }
+}
+
+/// Scan on a background thread while showing live progress.
+/// Returns None if the user cancelled.
+fn run_scan(terminal: &mut DefaultTerminal, path: &Path) -> io::Result<Option<Tree>> {
+    let progress = Arc::new(ScanProgress::default());
+    let (tx, rx) = mpsc::channel();
+    {
+        let progress = Arc::clone(&progress);
+        let root = path.to_path_buf();
+        thread::spawn(move || {
+            let tree = index::scan(root, &progress);
+            let _ = tx.send(tree);
+        });
+    }
+
+    let start = Instant::now();
+    loop {
+        if let Ok(tree) = rx.try_recv() {
+            return Ok(Some(tree));
+        }
+        terminal.draw(|f| ui::draw_scanning(f, path, &progress, start.elapsed()))?;
+        if event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()? {
+                let ctrl_c = key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(KeyModifiers::CONTROL);
+                if key.kind == KeyEventKind::Press
+                    && (key.code == KeyCode::Char('q') || key.code == KeyCode::Esc || ctrl_c)
+                {
+                    return Ok(None);
+                }
+            }
+    }
+}
+
+fn run_browse(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
+    loop {
+        terminal.draw(|f| ui::draw(f, app))?;
+
+        // Confirmed deletes run here so the "Deleting…" frame above is visible
+        // while the (possibly slow) filesystem operations happen.
+        if let Some((targets, permanent)) = app.pending_delete.take() {
+            app.perform_delete(&targets, permanent);
+            continue;
+        }
+
+        if event::poll(Duration::from_millis(200))?
+            && let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press {
+                    app.on_key(key);
+                }
+        if app.quit || app.rescan {
+            return Ok(());
+        }
+    }
+}
