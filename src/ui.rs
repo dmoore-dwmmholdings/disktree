@@ -196,11 +196,15 @@ fn draw_confirm(f: &mut Frame, app: &App, permanent: bool, targets: &[usize]) {
 
     const MAX_SHOWN: usize = 6;
     for &t in targets.iter().take(MAX_SHOWN) {
-        let node = &app.tree.nodes[t];
+        // Full path, not just the name: marks are held across navigation, so a
+        // bare name list renders three unrelated "bin" folders as "bin, bin, bin"
+        // with nothing to distinguish what is about to be deleted.
+        let size = format_size(app.tree.nodes[t].size);
+        let path = app.tree.path_of(t).display().to_string();
+        let room = 66usize.saturating_sub(size.len() + 6);
         lines.push(Line::from(format!(
-            "  {}  ({})",
-            node.name.to_string_lossy(),
-            format_size(node.size)
+            "  {}  ({size})",
+            truncate_left(&path, room)
         )));
     }
     if targets.len() > MAX_SHOWN {

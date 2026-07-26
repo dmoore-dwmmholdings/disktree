@@ -188,7 +188,7 @@ fn scan_dir(name: OsString, path: &Path, progress: &ScanProgress) -> ScanEntry {
     let dirs_seen = progress.dirs.fetch_add(1, Ordering::Relaxed);
     // Best-effort telemetry, sampled: this feeds a UI that redraws ~10x/sec, so
     // formatting every path would allocate far more than anyone can read.
-    if dirs_seen % PATH_SAMPLE_INTERVAL == 0
+    if dirs_seen.is_multiple_of(PATH_SAMPLE_INTERVAL)
         && let Ok(mut current) = progress.current.try_lock()
     {
         *current = path.display().to_string();
@@ -353,6 +353,46 @@ mod tests {
         assert_eq!(tree.path_of(inner), root.join("sub").join("inner"));
 
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A junction must appear as a zero-byte node and must not be traversed.
+    /// Before this, `continue` dropped it entirely, so a volume mounted under the
+    /// scan root was absent from the tree rather than shown as empty.
+    #[cfg(windows)]
+    #[test]
+    fn reparse_point_becomes_zero_byte_node() {
+        let root = fixture_root("reparse");
+        let link = root.join("link_to_sub");
+        let target = root.join("sub");
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .output();
+        // Junctions need no elevation, but skip rather than fail if unavailable.
+        let created = status.map(|o| o.status.success()).unwrap_or(false);
+        if !created {
+            let _ = fs::remove_dir_all(&root);
+            return;
+        }
+
+        let progress = ScanProgress::default();
+        let tree = scan(root.clone(), &progress);
+        let link_node = *tree.nodes[tree.root]
+            .children
+            .iter()
+            .find(|&&c| tree.nodes[c].name == "link_to_sub")
+            .expect("junction missing from tree");
+
+        assert_eq!(tree.nodes[link_node].size, 0, "junction contributed bytes");
+        assert!(
+            tree.nodes[link_node].children.is_empty(),
+            "junction was traversed"
+        );
+        // The junction's target must still be counted once, via the real path.
+        assert_eq!(tree.nodes[tree.root].size, 2149);
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

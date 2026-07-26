@@ -226,8 +226,20 @@ impl App {
         let mut failed = 0usize;
         let mut first_err: Option<String> = None;
 
+        let mut vanished = 0usize;
+        let mut partial = false;
+
         for &t in targets {
             let path = self.tree.path_of(t);
+
+            // The tree can be minutes old on a large scan, so confirm the target
+            // still exists rather than reporting a phantom deletion.
+            if fs::symlink_metadata(&path).is_err() {
+                vanished += 1;
+                self.tree.remove(t);
+                continue;
+            }
+
             let result = if permanent {
                 if self.tree.nodes[t].is_dir {
                     fs::remove_dir_all(&path)
@@ -236,7 +248,7 @@ impl App {
                 }
                 .map_err(|e| e.to_string())
             } else {
-                trash::delete(&path).map_err(|e| e.to_string())
+                trash::delete(&path).map_err(explain_trash_error)
             };
 
             match result {
@@ -246,9 +258,23 @@ impl App {
                     self.tree.remove(t);
                 }
                 Err(e) => {
-                    failed += 1;
-                    if first_err.is_none() {
-                        first_err = Some(e);
+                    // An error does not mean nothing happened: remove_dir_all can
+                    // delete most of a tree before hitting an open file, and
+                    // IFileOperation can recycle some items and abort others. If
+                    // the target is gone, treat it as deleted; if it survives, its
+                    // recorded size is now unreliable and so are its ancestors'.
+                    if fs::symlink_metadata(&path).is_err() {
+                        deleted += 1;
+                        freed += self.tree.nodes[t].size;
+                        self.tree.remove(t);
+                    } else {
+                        failed += 1;
+                        if self.tree.nodes[t].is_dir {
+                            partial = true;
+                        }
+                        if first_err.is_none() {
+                            first_err = Some(e);
+                        }
                     }
                 }
             }
@@ -269,14 +295,36 @@ impl App {
             "Moved to Recycle Bin:"
         };
         let mut msg = format!("{verb} {deleted} item(s), {} freed", format_size(freed));
+        if vanished > 0 {
+            msg.push_str(&format!(" — {vanished} already gone"));
+        }
         if failed > 0 {
             msg.push_str(&format!(
                 " — {failed} failed ({})",
                 first_err.unwrap_or_default()
             ));
         }
+        if partial {
+            msg.push_str(" — partially deleted, sizes may be stale; press r to rescan");
+        }
         self.status = Some(msg);
         self.mode = Mode::Browse;
+    }
+}
+
+/// Turn the one Recycle Bin failure users actually hit into something actionable.
+///
+/// `trash` drives `IFileOperation` with `FOF_NO_UI`, so when an item exceeds the
+/// Recycle Bin quota Windows aborts the operation and the crate surfaces only
+/// "Some operations were aborted", which tells the user nothing.
+fn explain_trash_error(e: trash::Error) -> String {
+    let text = e.to_string();
+    if text.contains("aborted") {
+        format!(
+            "{text} — usually too large for the Recycle Bin; use D to delete permanently instead"
+        )
+    } else {
+        text
     }
 }
 
@@ -298,8 +346,7 @@ pub fn format_count(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
-        // Not `is_multiple_of`: that is stable only since 1.87, above our MSRV.
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -326,5 +373,117 @@ mod tests {
         assert_eq!(format_count(999), "999");
         assert_eq!(format_count(1000), "1,000");
         assert_eq!(format_count(1234567), "1,234,567");
+    }
+
+    /// Two same-named files in different directories, both marked.
+    fn same_name_fixture(tag: &str) -> (std::path::PathBuf, App) {
+        use crate::index::{ScanProgress, scan};
+        use std::fs::{self, File};
+        use std::io::Write as _;
+
+        let root = std::env::temp_dir().join(format!("disktree_del_{tag}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("alpha")).unwrap();
+        fs::create_dir_all(root.join("beta")).unwrap();
+        File::create(root.join("alpha").join("bin"))
+            .unwrap()
+            .write_all(&[0u8; 300])
+            .unwrap();
+        File::create(root.join("beta").join("bin"))
+            .unwrap()
+            .write_all(&[0u8; 400])
+            .unwrap();
+
+        let progress = ScanProgress::default();
+        let app = App::new(scan(root.clone(), &progress));
+        (root, app)
+    }
+
+    fn find_node(app: &App, name: &str, parent_name: &str) -> usize {
+        (0..app.tree.nodes.len())
+            .find(|&i| {
+                app.tree.nodes[i].name == name
+                    && app.tree.nodes[i]
+                        .parent
+                        .is_some_and(|p| app.tree.nodes[p].name == parent_name)
+            })
+            .expect("node not found")
+    }
+
+    /// The confirm dialog must distinguish identically named targets, or the user
+    /// is agreeing to delete something they cannot identify.
+    #[test]
+    fn confirm_dialog_shows_full_paths_for_same_named_targets() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (root, mut app) = same_name_fixture("paths");
+        let a = find_node(&app, "bin", "alpha");
+        let b = find_node(&app, "bin", "beta");
+        app.marked.insert(a);
+        app.marked.insert(b);
+        app.mode = Mode::Confirm {
+            permanent: false,
+            targets: vec![a, b],
+        };
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let screen: String = (0..24)
+            .map(|y| {
+                (0..100)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            screen.contains("alpha") && screen.contains("beta"),
+            "dialog does not distinguish the two targets:\n{screen}"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A target deleted out-of-band between scan and confirm must reconcile the
+    /// tree rather than report a phantom success or leave a stale size behind.
+    #[test]
+    fn delete_reconciles_target_that_vanished() {
+        let (root, mut app) = same_name_fixture("vanish");
+        let a = find_node(&app, "bin", "alpha");
+        let root_size_before = app.tree.nodes[app.tree.root].size;
+
+        std::fs::remove_file(app.tree.path_of(a)).unwrap();
+        app.perform_delete(&[a], true);
+
+        assert!(app.tree.is_gone(a), "vanished target still in tree");
+        assert_eq!(
+            app.tree.nodes[app.tree.root].size,
+            root_size_before - 300,
+            "ancestor size not corrected"
+        );
+        let status = app.status.clone().unwrap_or_default();
+        assert!(status.contains("already gone"), "status was {status:?}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn delete_removes_file_and_updates_ancestors() {
+        let (root, mut app) = same_name_fixture("ok");
+        let b = find_node(&app, "bin", "beta");
+        let before = app.tree.nodes[app.tree.root].size;
+
+        app.perform_delete(&[b], true);
+
+        assert!(app.tree.is_gone(b));
+        assert_eq!(app.tree.nodes[app.tree.root].size, before - 400);
+        assert!(
+            !std::path::Path::new(&root)
+                .join("beta")
+                .join("bin")
+                .exists()
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
