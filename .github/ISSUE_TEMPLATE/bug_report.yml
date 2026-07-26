@@ -1,0 +1,50 @@
+name: Bug report
+description: Something is wrong or a size looks incorrect
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If a reported size looks wrong, please check the README's
+        "Understanding the numbers" section first — compression, sparse files,
+        cluster rounding, and hard links each cause expected discrepancies.
+
+  - type: input
+    id: version
+    attributes:
+      label: disktree version
+      description: Output of `disktree --version`.
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS and build
+      description: 'e.g. Windows 11 Pro 26200, or Ubuntu 24.04'
+    validations:
+      required: true
+
+  - type: input
+    id: filesystem
+    attributes:
+      label: Filesystem of the scanned volume
+      description: 'NTFS, ReFS, exFAT, ext4, a network share, …'
+    validations:
+      required: true
+
+  - type: dropdown
+    id: elevated
+    attributes:
+      label: Were you running elevated (as Administrator)?
+      options: ['No', 'Yes', 'Not applicable']
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Include the exact command, what you expected, and what you saw.
+    validations:
+      required: true

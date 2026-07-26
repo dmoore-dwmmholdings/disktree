@@ -1,3 +1,12 @@
+//! Parallel directory scanning into a flat, index-addressed tree.
+//!
+//! [`scan`] walks a directory and returns a [`Tree`]: a `Vec<Node>` arena in
+//! which every node names its parent and its children by index. Sizes and file
+//! counts are aggregated bottom-up during the walk, so
+//! `tree.nodes[i].size` is already the total for that whole subtree.
+//!
+//! See the [crate docs](crate) for what the sizes do and do not include.
+
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,32 +19,69 @@ use rayon::prelude::*;
 /// One directory in every this many refreshes the displayed "current path".
 const PATH_SAMPLE_INTERVAL: u64 = 1024;
 
-/// Shared counters updated live by the scan threads and read by the UI.
+/// Live counters a running [`scan`] publishes for a progress display.
+///
+/// Every field is written by many worker threads and may be read at any time, so
+/// the values are a moving snapshot and the four counters are not consistent
+/// with each other. They are updated once per directory rather than once per
+/// entry, which keeps 32 workers off one cache line.
 #[derive(Default)]
 pub struct ScanProgress {
+    /// Directories entered so far, including ones that turned out to be unreadable.
     pub dirs: AtomicU64,
+    /// Files counted so far.
     pub files: AtomicU64,
+    /// Bytes counted so far, as apparent sizes.
     pub bytes: AtomicU64,
+    /// Entries that could not be read. See [`Tree::errors`].
     pub errors: AtomicU64,
+    /// A recently visited path, for display only.
+    ///
+    /// Sampled rather than exact: workers write it with `try_lock` and skip the
+    /// update if the lock is held, so no worker ever blocks on the UI. Do not
+    /// change this to `lock()` — at 32 threads that serializes the whole scan
+    /// behind a string nobody can read at that rate anyway.
     pub current: Mutex<String>,
 }
 
-/// A single file or directory in the scanned tree (arena storage, indexed by `usize`).
+/// One file or directory. Owned by [`Tree::nodes`] and referred to by index.
 pub struct Node {
+    /// This entry's own name, with no directory part.
+    ///
+    /// The root node is the exception: it holds a display string for the whole
+    /// scanned path, which is why [`Tree::path_of`] skips it.
     pub name: OsString,
+    /// Whether this is a directory. Symlinks and junctions are recorded as
+    /// non-directories, since they are never traversed.
     pub is_dir: bool,
+    /// Total apparent bytes in this entry, including its whole subtree.
     pub size: u64,
+    /// Total files in this entry, including its whole subtree.
     pub n_files: u64,
+    /// Index of the containing directory, or `None` for the root.
     pub parent: Option<usize>,
+    /// Indices of the entries directly inside this one, in no particular order.
     pub children: Vec<usize>,
+    /// Set by [`Tree::remove`]. Indices stay valid after a delete, so held
+    /// indices (such as a set of marked rows) do not dangle; use
+    /// [`Tree::is_gone`] to test whether one is still live.
     pub deleted: bool,
 }
 
+/// A scanned directory tree, stored as a flat arena.
 pub struct Tree {
+    /// Every scanned entry. Indices into this are stable for the tree's lifetime.
     pub nodes: Vec<Node>,
+    /// Index of the root node in [`Self::nodes`].
     pub root: usize,
+    /// The path that was scanned, which the root node represents.
     pub root_path: PathBuf,
+    /// How many entries could not be read, usually for lack of permission.
+    ///
+    /// These contribute zero bytes, so a scan with a nonzero count is an
+    /// undercount rather than a failure.
     pub errors: u64,
+    /// Wall-clock seconds the walk took.
     pub scan_secs: f64,
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "disktree"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Disk usage TUI: scan a drive, see what's taking space, and delete it safely"
@@ -15,7 +15,22 @@ clap = { version = "4.6.1", features = ["derive"] }
 ratatui = "0.29"
 rayon = "1.10"
 trash = "5"
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_IO", "Win32_Storage_FileSystem", "Win32_Security"] }
+
+# Only the capability probe example needs Win32 directly; keeping it out of
+# [dependencies] keeps the published crate at four dependencies.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+] }
+
+[package.metadata.docs.rs]
+# This is a Windows-first tool; document it as such, but keep the Linux build
+# visible so the portable walk stays honest.
+default-target = "x86_64-pc-windows-msvc"
+targets = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
 
 [profile.release]
 lto = true
