@@ -14,12 +14,13 @@ use std::os::windows::ffi::OsStrExt;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    OPEN_EXISTING, ReadFile,
+    FILE_TRAVERSE, OPEN_EXISTING, ReadFile,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 
 const FSCTL_ENUM_USN_DATA: u32 = 0x0009_00B3;
 const FSCTL_QUERY_USN_JOURNAL: u32 = 0x0009_00F4;
+const FSCTL_IS_VOLUME_MOUNTED: u32 = 0x0009_0028;
 const GENERIC_READ: u32 = 0x8000_0000;
 
 fn open_volume(letter: char, access: u32) -> Result<HANDLE, u32> {
@@ -55,9 +56,13 @@ fn main() {
 
     println!("probing volume {letter}:\n");
 
-    let masks: [(&str, u32); 4] = [
+    // FILE_TRAVERSE is included because it opens the device unelevated and is
+    // therefore another way to mistake "handle obtained" for "can read bytes".
+    // The gate is FILE_READ_DATA; nothing weaker implies capability.
+    let masks: [(&str, u32); 5] = [
         ("access=0 (query only)", 0),
         ("FILE_READ_ATTRIBUTES", FILE_READ_ATTRIBUTES),
+        ("FILE_TRAVERSE", FILE_TRAVERSE),
         ("FILE_READ_DATA", FILE_READ_DATA),
         ("GENERIC_READ", GENERIC_READ),
     ];
@@ -76,6 +81,37 @@ fn main() {
 
     for &(label, h) in &handles {
         println!("\n== 2/3. FSCTLs on handle ({label}) ==");
+
+        // Canary. FSCTL_IS_VOLUME_MOUNTED needs no access rights, so if it also
+        // fails then this handle is simply the wrong shape for filesystem ioctls
+        // and the results below say nothing about privilege. Without this, an
+        // ERROR_INVALID_FUNCTION (1) reads like a capability answer when it is
+        // really "asked the wrong object".
+        let mut returned = 0u32;
+        // SAFETY: h is a valid handle; this ioctl takes no input or output buffer.
+        let canary = unsafe {
+            DeviceIoControl(
+                h,
+                FSCTL_IS_VOLUME_MOUNTED,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                &mut returned,
+                std::ptr::null_mut(),
+            )
+        };
+        println!(
+            "  canary FSCTL_IS_VOLUME_MOUNTED -> {}",
+            if canary != 0 {
+                "OK (handle accepts filesystem ioctls)".to_owned()
+            } else {
+                format!(
+                    "FAILED (os error {}) — treat the rows below as inconclusive",
+                    io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+                )
+            }
+        );
 
         // USN_JOURNAL_DATA_V2 is 80 bytes.
         let mut out = [0u8; 80];
