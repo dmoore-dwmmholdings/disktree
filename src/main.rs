@@ -8,12 +8,12 @@ use clap::Parser;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
-use rustree::app::App;
-use rustree::index::{self, ScanProgress, Tree};
-use rustree::ui;
+use disktree::app::App;
+use disktree::index::{self, ScanProgress, Tree};
+use disktree::ui;
 
 #[derive(Parser, Debug)]
-#[command(name = "rustree", version, about = "A simple TUI based file size viewer")]
+#[command(name = "disktree", version, about = "Disk usage TUI: scan, browse, and delete what's taking space")]
 struct Args {
     /// Initial path, speeds up invocation
     #[arg(short, long)]

@@ -244,7 +244,7 @@ pub fn draw_scanning(f: &mut Frame, root: &Path, progress: &ScanProgress, elapse
 
     f.render_widget(Clear, area);
     f.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(" rustree ")),
+        Paragraph::new(lines).block(Block::bordered().title(" disktree ")),
         area,
     );
 }

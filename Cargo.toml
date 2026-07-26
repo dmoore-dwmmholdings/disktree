@@ -1,7 +1,14 @@
 [package]
-name = "rustree"
+name = "disktree"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Disk usage TUI: scan a drive, see what's taking space, and delete it safely"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dmoore-dwmmholdings/disktree"
+readme = "README.md"
+keywords = ["disk-usage", "tui", "du", "cleanup", "filesystem"]
+categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
