@@ -290,7 +290,10 @@ fn main() {
     // SAFETY: opened above and closed once.
     unsafe { CloseHandle(root_h) };
     if ok == 0 {
-        println!("  FSCTL_GET_NTFS_VOLUME_DATA failed (os error {})", last_err());
+        println!(
+            "  FSCTL_GET_NTFS_VOLUME_DATA failed (os error {})",
+            last_err()
+        );
         println!("\nNO-GO: not an NTFS volume, or the ioctl is unavailable.");
         return;
     }
@@ -304,7 +307,10 @@ fn main() {
         "  clusters/record segment  : {} (0 is normal when a record is smaller than a cluster)",
         vd.ClustersPerFileRecordSegment
     );
-    println!("  MftValidDataLength       : {} bytes", vd.MftValidDataLength);
+    println!(
+        "  MftValidDataLength       : {} bytes",
+        vd.MftValidDataLength
+    );
     println!("  MftStartLcn              : {}", vd.MftStartLcn);
     println!(
         "  => up to {} MFT record slots",
@@ -445,9 +451,7 @@ fn main() {
     let flags = u16::from_le_bytes(rec[0x16..0x18].try_into().unwrap());
     let name = first_file_name(&rec);
     println!("  self record number : {self_num} (expected 0)");
-    println!(
-        "  flags              : {flags:#06x} (bit0 in-use, bit1 directory)",
-    );
+    println!("  flags              : {flags:#06x} (bit0 in-use, bit1 directory)",);
     println!("  $FILE_NAME         : {name:?} (expected Some(\"$MFT\"))");
     let record_ok = self_num == 0 && flags & 1 == 1 && name.as_deref() == Some("$MFT");
     if !record_ok {
@@ -488,7 +492,10 @@ fn main() {
     }
     let secs = start.elapsed().as_secs_f64();
     let mbps = total as f64 / 1e6 / secs.max(1e-9);
-    println!("  read {:.1} MB in {secs:.3} s = {mbps:.0} MB/s", total as f64 / 1e6);
+    println!(
+        "  read {:.1} MB in {secs:.3} s = {mbps:.0} MB/s",
+        total as f64 / 1e6
+    );
     println!(
         "  => projected full MFT read: {:.1} s for {:.2} GB",
         vd.MftValidDataLength as f64 / 1e6 / mbps.max(1.0),
