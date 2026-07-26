@@ -8,8 +8,13 @@ use crate::index::Tree;
 
 pub enum Mode {
     Browse,
-    Confirm { permanent: bool, targets: Vec<usize> },
-    Deleting { count: usize },
+    Confirm {
+        permanent: bool,
+        targets: Vec<usize>,
+    },
+    Deleting {
+        count: usize,
+    },
 }
 
 pub struct App {
@@ -109,7 +114,9 @@ impl App {
                 if let Mode::Confirm { permanent, targets } =
                     std::mem::replace(&mut self.mode, Mode::Browse)
                 {
-                    self.mode = Mode::Deleting { count: targets.len() };
+                    self.mode = Mode::Deleting {
+                        count: targets.len(),
+                    };
                     self.pending_delete = Some((targets, permanent));
                 }
             }
@@ -130,11 +137,12 @@ impl App {
 
     fn enter_dir(&mut self) {
         if let Some(&idx) = self.rows.get(self.selected)
-            && self.tree.nodes[idx].is_dir {
-                self.cwd = idx;
-                self.selected = 0;
-                self.refresh_rows();
-            }
+            && self.tree.nodes[idx].is_dir
+        {
+            self.cwd = idx;
+            self.selected = 0;
+            self.refresh_rows();
+        }
     }
 
     fn go_up(&mut self) {
@@ -226,7 +234,11 @@ impl App {
         }
         self.refresh_rows();
 
-        let verb = if permanent { "Permanently deleted" } else { "Moved to Recycle Bin:" };
+        let verb = if permanent {
+            "Permanently deleted"
+        } else {
+            "Moved to Recycle Bin:"
+        };
         let mut msg = format!("{verb} {deleted} item(s), {} freed", format_size(freed));
         if failed > 0 {
             msg.push_str(&format!(
@@ -257,7 +269,8 @@ pub fn format_count(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+        // Not `is_multiple_of`: that is stable only since 1.87, above our MSRV.
+        if i > 0 && (digits.len() - i) % 3 == 0 {
             out.push(',');
         }
         out.push(c);

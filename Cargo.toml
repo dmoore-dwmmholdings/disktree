@@ -2,7 +2,7 @@
 name = "disktree"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Disk usage TUI: scan a drive, see what's taking space, and delete it safely"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dmoore-dwmmholdings/disktree"
@@ -15,6 +15,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 ratatui = "0.29"
 rayon = "1.10"
 trash = "5"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_IO", "Win32_Storage_FileSystem", "Win32_Security"] }
 
 [profile.release]
 lto = true

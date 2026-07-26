@@ -16,9 +16,12 @@ const BAR_WIDTH: usize = 10;
 const PARTIAL_BLOCKS: [char; 8] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
 
 pub fn draw(f: &mut Frame, app: &mut App) {
-    let [header_area, table_area, footer_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(0), Constraint::Length(2)])
-            .areas(f.area());
+    let [header_area, table_area, footer_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(2),
+    ])
+    .areas(f.area());
 
     draw_header(f, app, header_area);
     draw_table(f, app, table_area);
@@ -45,7 +48,11 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     // Keep the tail (current dir + totals) visible when the path is long.
     let text = truncate_left(&text, area.width as usize);
     f.render_widget(
-        Paragraph::new(text).style(Style::new().add_modifier(Modifier::BOLD).bg(Color::DarkGray)),
+        Paragraph::new(text).style(
+            Style::new()
+                .add_modifier(Modifier::BOLD)
+                .bg(Color::DarkGray),
+        ),
         area,
     );
 }
@@ -61,8 +68,8 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
             let marked = app.marked.contains(&idx);
             let pct = node.size as f64 / total as f64 * 100.0;
 
-            let mark_cell = Cell::from(if marked { "●" } else { " " })
-                .style(Style::new().fg(Color::Yellow));
+            let mark_cell =
+                Cell::from(if marked { "●" } else { " " }).style(Style::new().fg(Color::Yellow));
             let size_cell = Cell::from(format!("{:>10}", format_size(node.size)));
             let pct_cell = Cell::from(format!("{pct:>5.1}%"));
             let bar_cell = Cell::from(bar(pct)).style(Style::new().fg(Color::Green));
@@ -79,7 +86,9 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 Cell::from(name)
             };
 
-            let row = Row::new(vec![mark_cell, size_cell, pct_cell, bar_cell, items_cell, name_cell]);
+            let row = Row::new(vec![
+                mark_cell, size_cell, pct_cell, bar_cell, items_cell, name_cell,
+            ]);
             if marked {
                 row.style(Style::new().fg(Color::Yellow))
             } else {
@@ -100,8 +109,11 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         ],
     )
     .header(
-        Row::new(vec!["", "      Size", "     %", "", "     Items", "Name"])
-            .style(Style::new().add_modifier(Modifier::UNDERLINED).fg(Color::Gray)),
+        Row::new(vec!["", "      Size", "     %", "", "     Items", "Name"]).style(
+            Style::new()
+                .add_modifier(Modifier::UNDERLINED)
+                .fg(Color::Gray),
+        ),
     )
     .row_highlight_style(Style::new().bg(Color::Blue));
 
@@ -114,7 +126,11 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
 
     if app.rows.is_empty() {
         let msg = Paragraph::new("  (empty directory)").style(Style::new().fg(Color::DarkGray));
-        let inner = Rect { y: area.y + 1, height: 1, ..area };
+        let inner = Rect {
+            y: area.y + 1,
+            height: 1,
+            ..area
+        };
         f.render_widget(msg, inner);
     }
 }
@@ -124,11 +140,18 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
 
     let info: Line = if let Some(status) = &app.status {
-        Line::from(Span::styled(format!(" {status}"), Style::new().fg(Color::Green)))
+        Line::from(Span::styled(
+            format!(" {status}"),
+            Style::new().fg(Color::Green),
+        ))
     } else if !app.marked.is_empty() {
         let marked_size: u64 = app.marked.iter().map(|&i| app.tree.nodes[i].size).sum();
         Line::from(Span::styled(
-            format!(" {} marked — {}", app.marked.len(), format_size(marked_size)),
+            format!(
+                " {} marked — {}",
+                app.marked.len(),
+                format_size(marked_size)
+            ),
             Style::new().fg(Color::Yellow),
         ))
     } else {
@@ -178,7 +201,10 @@ fn draw_confirm(f: &mut Frame, app: &App, permanent: bool, targets: &[usize]) {
         )));
     }
     if targets.len() > MAX_SHOWN {
-        lines.push(Line::from(format!("  … and {} more", targets.len() - MAX_SHOWN)));
+        lines.push(Line::from(format!(
+            "  … and {} more",
+            targets.len() - MAX_SHOWN
+        )));
     }
     lines.push(Line::default());
     lines.push(Line::from(vec![
@@ -220,7 +246,11 @@ pub fn draw_scanning(f: &mut Frame, root: &Path, progress: &ScanProgress, elapse
     let files = progress.files.load(Ordering::Relaxed);
     let bytes = progress.bytes.load(Ordering::Relaxed);
     let errors = progress.errors.load(Ordering::Relaxed);
-    let current = progress.current.lock().map(|c| c.clone()).unwrap_or_default();
+    let current = progress
+        .current
+        .lock()
+        .map(|c| c.clone())
+        .unwrap_or_default();
 
     let max_path = area.width.saturating_sub(14) as usize;
     let shown_path = truncate_left(&current, max_path);
@@ -287,10 +317,10 @@ fn centered(width: u16, height: u16, area: Rect) -> Rect {
 mod tests {
     use super::*;
     use crate::index::{ScanProgress, scan};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use std::fs::{self, File};
     use std::io::Write as _;
-    use ratatui::backend::TestBackend;
-    use ratatui::Terminal;
 
     #[test]
     fn bar_widths() {
@@ -304,8 +334,14 @@ mod tests {
         let root = std::env::temp_dir().join(format!("rustree_ui_{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
-        File::create(root.join("big.bin")).unwrap().write_all(&[0u8; 8000]).unwrap();
-        File::create(root.join("small.bin")).unwrap().write_all(&[0u8; 2000]).unwrap();
+        File::create(root.join("big.bin"))
+            .unwrap()
+            .write_all(&[0u8; 8000])
+            .unwrap();
+        File::create(root.join("small.bin"))
+            .unwrap()
+            .write_all(&[0u8; 2000])
+            .unwrap();
 
         let progress = ScanProgress::default();
         let tree = scan(root.clone(), &progress);

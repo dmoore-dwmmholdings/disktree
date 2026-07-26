@@ -13,7 +13,11 @@ use disktree::index::{self, ScanProgress, Tree};
 use disktree::ui;
 
 #[derive(Parser, Debug)]
-#[command(name = "disktree", version, about = "Disk usage TUI: scan, browse, and delete what's taking space")]
+#[command(
+    name = "disktree",
+    version,
+    about = "Disk usage TUI: scan, browse, and delete what's taking space"
+)]
 struct Args {
     /// Initial path, speeds up invocation
     #[arg(short, long)]
@@ -68,15 +72,16 @@ fn run_scan(terminal: &mut DefaultTerminal, path: &Path) -> io::Result<Option<Tr
         }
         terminal.draw(|f| ui::draw_scanning(f, path, &progress, start.elapsed()))?;
         if event::poll(Duration::from_millis(100))?
-            && let Event::Key(key) = event::read()? {
-                let ctrl_c = key.code == KeyCode::Char('c')
-                    && key.modifiers.contains(KeyModifiers::CONTROL);
-                if key.kind == KeyEventKind::Press
-                    && (key.code == KeyCode::Char('q') || key.code == KeyCode::Esc || ctrl_c)
-                {
-                    return Ok(None);
-                }
+            && let Event::Key(key) = event::read()?
+        {
+            let ctrl_c =
+                key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+            if key.kind == KeyEventKind::Press
+                && (key.code == KeyCode::Char('q') || key.code == KeyCode::Esc || ctrl_c)
+            {
+                return Ok(None);
             }
+        }
     }
 }
 
@@ -93,9 +98,10 @@ fn run_browse(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
 
         if event::poll(Duration::from_millis(200))?
             && let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press {
-                    app.on_key(key);
-                }
+            && key.kind == KeyEventKind::Press
+        {
+            app.on_key(key);
+        }
         if app.quit || app.rescan {
             return Ok(());
         }

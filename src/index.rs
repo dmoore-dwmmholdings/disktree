@@ -96,7 +96,8 @@ pub fn scan(root: PathBuf, progress: &ScanProgress) -> Tree {
     let entry = scan_dir(root_name, &root, progress);
     let scan_secs = start.elapsed().as_secs_f64();
 
-    let expected = 1 + progress.dirs.load(Ordering::Relaxed) + progress.files.load(Ordering::Relaxed);
+    let expected =
+        1 + progress.dirs.load(Ordering::Relaxed) + progress.files.load(Ordering::Relaxed);
     let mut nodes: Vec<Node> = Vec::with_capacity(expected as usize);
     nodes.push(Node {
         name: entry.name,
@@ -150,7 +151,13 @@ fn scan_dir(name: OsString, path: &Path, progress: &ScanProgress) -> ScanEntry {
         Ok(rd) => rd,
         Err(_) => {
             progress.errors.fetch_add(1, Ordering::Relaxed);
-            return ScanEntry { name, is_dir: true, size: 0, n_files: 0, children };
+            return ScanEntry {
+                name,
+                is_dir: true,
+                size: 0,
+                n_files: 0,
+                children,
+            };
         }
     };
 
@@ -199,7 +206,13 @@ fn scan_dir(name: OsString, path: &Path, progress: &ScanProgress) -> ScanEntry {
 
     let size = children.iter().map(|c| c.size).sum();
     let n_files = children.iter().map(|c| c.n_files).sum();
-    ScanEntry { name, is_dir: true, size, n_files, children }
+    ScanEntry {
+        name,
+        is_dir: true,
+        size,
+        n_files,
+        children,
+    }
 }
 
 #[cfg(test)]
@@ -210,9 +223,18 @@ mod tests {
 
     fn build_fixture(root: &Path) {
         fs::create_dir_all(root.join("sub").join("inner")).unwrap();
-        File::create(root.join("a.txt")).unwrap().write_all(&[0u8; 100]).unwrap();
-        File::create(root.join("sub").join("b.txt")).unwrap().write_all(&[0u8; 2048]).unwrap();
-        File::create(root.join("sub").join("inner").join("c.txt")).unwrap().write_all(&[0u8; 1]).unwrap();
+        File::create(root.join("a.txt"))
+            .unwrap()
+            .write_all(&[0u8; 100])
+            .unwrap();
+        File::create(root.join("sub").join("b.txt"))
+            .unwrap()
+            .write_all(&[0u8; 2048])
+            .unwrap();
+        File::create(root.join("sub").join("inner").join("c.txt"))
+            .unwrap()
+            .write_all(&[0u8; 1])
+            .unwrap();
     }
 
     fn fixture_root(tag: &str) -> PathBuf {
