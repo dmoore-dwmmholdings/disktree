@@ -59,9 +59,10 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
     let total = app.tree.nodes[app.cwd].size.max(1);
+    // One line of the area is the header, so it cannot hold data rows.
+    let window = app.visible_range(area.height.saturating_sub(1) as usize);
 
-    let rows: Vec<Row> = app
-        .rows
+    let rows: Vec<Row> = app.rows[window.clone()]
         .iter()
         .map(|&idx| {
             let node = &app.tree.nodes[idx];
@@ -117,10 +118,12 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
     )
     .row_highlight_style(Style::new().bg(Color::Blue));
 
-    app.table_state.select(if app.rows.is_empty() {
+    // The table only received the visible slice, so the highlight index must be
+    // relative to the window, not to the full row list.
+    app.table_state.select(if window.is_empty() {
         None
     } else {
-        Some(app.selected.min(app.rows.len() - 1))
+        Some(app.selected.saturating_sub(window.start))
     });
     f.render_stateful_widget(table, area, &mut app.table_state);
 
@@ -365,5 +368,162 @@ mod tests {
         assert!(line(3).contains("small.bin"));
 
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// An `App` over a synthetic tree with `n` equal children, no filesystem.
+    fn synthetic_app(n: usize) -> crate::app::App {
+        use crate::index::{Node, Tree};
+        let mut nodes = vec![Node {
+            name: std::ffi::OsString::from("root"),
+            is_dir: true,
+            size: n as u64 * 10,
+            n_files: n as u64,
+            parent: None,
+            children: (1..=n).collect(),
+            deleted: false,
+        }];
+        for i in 0..n {
+            nodes.push(Node {
+                name: std::ffi::OsString::from(format!("f{i:06}")),
+                is_dir: false,
+                // Descending so sort order is predictable and stable.
+                size: (n - i) as u64 * 10,
+                n_files: 1,
+                parent: Some(0),
+                children: Vec::new(),
+                deleted: false,
+            });
+        }
+        crate::app::App::new(Tree {
+            nodes,
+            root: 0,
+            root_path: std::path::PathBuf::from("T:\\synthetic"),
+            errors: 0,
+            scan_secs: 0.0,
+        })
+    }
+
+    /// Rendered data rows, in order, as trimmed name text.
+    fn rendered_names(app: &mut crate::app::App, w: u16, h: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let mut out = Vec::new();
+        // Row 0 is the header line, then data rows until the footer.
+        for y in 2..h.saturating_sub(2) {
+            let text: String = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            if let Some(tok) = text.split_whitespace().find(|t| t.starts_with('f')) {
+                out.push(tok.to_owned());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn window_empty_directory() {
+        let mut app = synthetic_app(0);
+        assert_eq!(app.visible_range(10), 0..0);
+        assert_eq!(app.offset, 0);
+        // Must not panic with no rows.
+        let _ = rendered_names(&mut app, 80, 12);
+    }
+
+    #[test]
+    fn window_single_entry() {
+        let mut app = synthetic_app(1);
+        assert_eq!(app.visible_range(10), 0..1);
+        assert_eq!(rendered_names(&mut app, 80, 12), vec!["f000000"]);
+    }
+
+    #[test]
+    fn window_selection_at_top_shows_first_rows() {
+        let mut app = synthetic_app(1000);
+        app.selected = 0;
+        assert_eq!(app.visible_range(5), 0..5);
+        assert_eq!(app.offset, 0);
+    }
+
+    #[test]
+    fn window_selection_at_end_scrolls_to_bottom() {
+        let mut app = synthetic_app(1000);
+        app.selected = 999;
+        let r = app.visible_range(5);
+        assert_eq!(r, 995..1000);
+        // The selection must land inside the drawn window.
+        assert!(r.contains(&app.selected));
+    }
+
+    #[test]
+    fn window_shrinks_when_delete_removes_rows() {
+        let mut app = synthetic_app(20);
+        app.selected = 19;
+        app.visible_range(5);
+        assert_eq!(app.offset, 15);
+        // Simulate the list shrinking under a scrolled-down view.
+        app.rows.truncate(6);
+        let r = app.visible_range(5);
+        assert!(r.end <= 6, "range {r:?} exceeds row count");
+        assert!(app.selected < 6, "selection {} out of range", app.selected);
+        assert!(r.contains(&app.selected));
+    }
+
+    #[test]
+    fn window_reclamps_after_resize() {
+        let mut app = synthetic_app(100);
+        app.selected = 99;
+        app.visible_range(5);
+        assert_eq!(app.offset, 95);
+        // A taller terminal must not leave blank space below the last row.
+        let r = app.visible_range(40);
+        assert_eq!(r, 60..100);
+        assert!(r.contains(&app.selected));
+        // And a shorter one must bring the selection back into view.
+        let r = app.visible_range(3);
+        assert!(r.contains(&app.selected), "range {r:?} lost selection");
+    }
+
+    #[test]
+    fn window_renders_only_visible_slice() {
+        let mut app = synthetic_app(100_000);
+        // Sorted by size descending, so f000000 is first.
+        let names = rendered_names(&mut app, 80, 12);
+        assert!(names.len() <= 12, "drew {} rows into 12 lines", names.len());
+        assert_eq!(names.first().map(String::as_str), Some("f000000"));
+        assert_eq!(names.get(1).map(String::as_str), Some("f000001"));
+    }
+
+    /// The pre-windowing renderer built one widget per child, so a frame cost
+    /// grew with directory size (~0.5 s at 100k children). Only the visible slice
+    /// is built now, so a 100x larger directory must not cost meaningfully more.
+    #[test]
+    fn window_render_cost_is_independent_of_directory_size() {
+        fn per_frame_secs(n: usize) -> f64 {
+            let mut app = synthetic_app(n);
+            let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+            // Draw once so lazy setup is not charged to the measurement.
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
+            let start = std::time::Instant::now();
+            for _ in 0..20 {
+                terminal.draw(|f| draw(f, &mut app)).unwrap();
+            }
+            start.elapsed().as_secs_f64() / 20.0
+        }
+
+        let small = per_frame_secs(1_000);
+        let large = per_frame_secs(100_000);
+        eprintln!(
+            "MEASURED: {:.3} ms/frame at 1k children, {:.3} ms/frame at 100k",
+            small * 1000.0,
+            large * 1000.0
+        );
+        // 100x the children must not cost 5x the frame. Generous, because these
+        // are sub-millisecond timings on a shared CI box.
+        assert!(
+            large < small * 5.0 + 0.002,
+            "frame cost scales with directory size: {:.3} ms at 1k vs {:.3} ms at 100k",
+            small * 1000.0,
+            large * 1000.0
+        );
+        assert!(large < 0.010, "{:.3} ms per frame at 100k", large * 1000.0);
     }
 }

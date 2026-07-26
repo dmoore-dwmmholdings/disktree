@@ -7,6 +7,9 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
+/// One directory in every this many refreshes the displayed "current path".
+const PATH_SAMPLE_INTERVAL: u64 = 1024;
+
 /// Shared counters updated live by the scan threads and read by the UI.
 #[derive(Default)]
 pub struct ScanProgress {
@@ -89,11 +92,48 @@ struct ScanEntry {
     children: Vec<ScanEntry>,
 }
 
+/// Threads to use for directory enumeration when the caller does not choose.
+///
+/// Cold-cache scanning is bound on directory-index reads rather than CPU: a
+/// worker sits blocked in the kernel instead of computing, so one thread per
+/// core can leave the device queue short of requests. Hence 2x cores.
+///
+/// It is deliberately only 2x. A larger pool is defensible in theory, but on the
+/// development machine it could not be shown to help: warm throughput is flat
+/// from 16 to 128 threads, and a cold comparison was not obtainable (with 64 GB
+/// of RAM the NTFS metadata cache never evicts, and dropping it needs
+/// privileges). Absent evidence, this stays near the measured-flat region and
+/// `--threads` exists for anyone whose workload differs.
+fn default_io_threads() -> usize {
+    let cpus = std::thread::available_parallelism().map_or(8, |n| n.get());
+    (cpus * 2).clamp(8, 64)
+}
+
+/// Build the pool used for directory enumeration.
+///
+/// Deliberately separate from rayon's global pool: the CPU-bound aggregation
+/// work wants one thread per core, and this one is intentionally oversubscribed.
+fn io_pool(threads: Option<usize>) -> rayon::ThreadPool {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads.unwrap_or_else(default_io_threads))
+        // Recursion depth follows tree depth; this is reserved address space,
+        // not committed memory.
+        .stack_size(4 << 20)
+        .build()
+        .expect("build scan thread pool")
+}
+
 /// Scan `root` recursively (in parallel) and return the flattened tree.
 pub fn scan(root: PathBuf, progress: &ScanProgress) -> Tree {
+    scan_with_threads(root, progress, None)
+}
+
+/// [`scan`], with an explicit enumeration thread count. `None` picks a default.
+pub fn scan_with_threads(root: PathBuf, progress: &ScanProgress, threads: Option<usize>) -> Tree {
     let start = Instant::now();
     let root_name = OsString::from(root.display().to_string());
-    let entry = scan_dir(root_name, &root, progress);
+    let pool = io_pool(threads);
+    let entry = pool.install(|| scan_dir(root_name, &root, progress));
     let scan_secs = start.elapsed().as_secs_f64();
 
     let expected =
@@ -139,8 +179,18 @@ pub fn scan(root: PathBuf, progress: &ScanProgress) -> Tree {
 }
 
 fn scan_dir(name: OsString, path: &Path, progress: &ScanProgress) -> ScanEntry {
-    progress.dirs.fetch_add(1, Ordering::Relaxed);
-    if let Ok(mut current) = progress.current.try_lock() {
+    // Counters are accumulated locally and published once per directory. Doing
+    // it per entry puts 32 workers on the same cache line for no extra fidelity.
+    let mut n_files_here = 0u64;
+    let mut bytes_here = 0u64;
+    let mut errors_here = 0u64;
+
+    let dirs_seen = progress.dirs.fetch_add(1, Ordering::Relaxed);
+    // Best-effort telemetry, sampled: this feeds a UI that redraws ~10x/sec, so
+    // formatting every path would allocate far more than anyone can read.
+    if dirs_seen % PATH_SAMPLE_INTERVAL == 0
+        && let Ok(mut current) = progress.current.try_lock()
+    {
         *current = path.display().to_string();
     }
 
@@ -165,29 +215,55 @@ fn scan_dir(name: OsString, path: &Path, progress: &ScanProgress) -> ScanEntry {
         let entry = match entry {
             Ok(e) => e,
             Err(_) => {
-                progress.errors.fetch_add(1, Ordering::Relaxed);
+                errors_here += 1;
                 continue;
             }
         };
         let file_type = match entry.file_type() {
             Ok(t) => t,
             Err(_) => {
-                progress.errors.fetch_add(1, Ordering::Relaxed);
+                errors_here += 1;
                 continue;
             }
         };
 
-        // Skip symlinks and junctions to avoid cycles and double counting.
+        // Reparse points that are name surrogates (symlinks, junctions, volume
+        // mount points) are recorded as zero-byte entries but never traversed:
+        // following them would double-count or cycle. They must still appear as
+        // nodes, otherwise a volume mounted under the scan root vanishes from
+        // the tree entirely rather than showing as empty.
+        //
+        // The test is deliberately `is_symlink()`, which std implements as
+        // "reparse point AND name-surrogate bit". A blanket
+        // FILE_ATTRIBUTE_REPARSE_POINT check would also skip Dropbox/OneDrive
+        // and dedup-backed files, whose reparse tags are not surrogates and
+        // whose contents must be counted.
         if file_type.is_symlink() {
+            children.push(ScanEntry {
+                name: entry.file_name(),
+                is_dir: false,
+                size: 0,
+                n_files: 0,
+                children: Vec::new(),
+            });
             continue;
         }
 
         if file_type.is_dir() {
             subdirs.push((entry.file_name(), entry.path()));
         } else {
-            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            progress.files.fetch_add(1, Ordering::Relaxed);
-            progress.bytes.fetch_add(size, Ordering::Relaxed);
+            // On Windows this is served from the cached directory entry and
+            // cannot fail; on other platforms it can, and a silent 0 would be
+            // reported as a real size, so count it.
+            let size = match entry.metadata() {
+                Ok(m) => m.len(),
+                Err(_) => {
+                    errors_here += 1;
+                    0
+                }
+            };
+            n_files_here += 1;
+            bytes_here += size;
             children.push(ScanEntry {
                 name: entry.file_name(),
                 is_dir: false,
@@ -196,6 +272,14 @@ fn scan_dir(name: OsString, path: &Path, progress: &ScanProgress) -> ScanEntry {
                 children: Vec::new(),
             });
         }
+    }
+
+    if n_files_here > 0 {
+        progress.files.fetch_add(n_files_here, Ordering::Relaxed);
+        progress.bytes.fetch_add(bytes_here, Ordering::Relaxed);
+    }
+    if errors_here > 0 {
+        progress.errors.fetch_add(errors_here, Ordering::Relaxed);
     }
 
     let mut scanned_dirs: Vec<ScanEntry> = subdirs

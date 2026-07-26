@@ -24,6 +24,9 @@ pub struct App {
     /// Children of `cwd`, sorted by size descending.
     pub rows: Vec<usize>,
     pub selected: usize,
+    /// Index of the first row drawn. Only the visible slice is ever built into
+    /// widgets, so render cost is independent of how many children `cwd` has.
+    pub offset: usize,
     pub marked: HashSet<usize>,
     pub mode: Mode,
     pub status: Option<String>,
@@ -48,6 +51,7 @@ impl App {
             tree,
             rows: Vec::new(),
             selected: 0,
+            offset: 0,
             marked: HashSet::new(),
             mode: Mode::Browse,
             status,
@@ -69,6 +73,31 @@ impl App {
         if self.selected >= self.rows.len() {
             self.selected = self.rows.len().saturating_sub(1);
         }
+    }
+
+    /// Clamp `offset` so the selection is on screen, and return the range of
+    /// rows to draw.
+    ///
+    /// Called every frame rather than only on key events, because a terminal
+    /// resize changes `height` without any key being pressed.
+    pub fn visible_range(&mut self, height: usize) -> std::ops::Range<usize> {
+        let len = self.rows.len();
+        if len == 0 || height == 0 {
+            self.offset = 0;
+            return 0..0;
+        }
+        if self.selected >= len {
+            self.selected = len - 1;
+        }
+        // Scroll just far enough to bring the selection back into view.
+        if self.selected < self.offset {
+            self.offset = self.selected;
+        } else if self.selected >= self.offset + height {
+            self.offset = self.selected - height + 1;
+        }
+        // Never leave blank rows below a full list.
+        self.offset = self.offset.min(len.saturating_sub(height));
+        self.offset..(self.offset + height).min(len)
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
