@@ -423,6 +423,61 @@ mod tests {
         out
     }
 
+    /// The highlight index is relative to the rendered window, so a scrolled view
+    /// must still paint the selected row and no other.
+    #[test]
+    fn selected_row_is_highlighted_within_the_window() {
+        for (n, selected) in [(5usize, 0usize), (5, 3), (1000, 0), (1000, 999)] {
+            let mut app = synthetic_app(n);
+            app.selected = selected;
+            let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
+            let buf = terminal.backend().buffer().clone();
+
+            // Table occupies y=1 (header) then data rows from y=2.
+            let highlighted: Vec<u16> = (2..10)
+                .filter(|&y| buf[(2, y)].style().bg == Some(Color::Blue))
+                .collect();
+            assert_eq!(
+                highlighted.len(),
+                1,
+                "n={n} selected={selected}: {} highlighted rows, expected 1",
+                highlighted.len()
+            );
+            // It must be the row holding the selection.
+            let expected_y = 2 + (app.selected - app.offset) as u16;
+            assert_eq!(
+                highlighted[0], expected_y,
+                "n={n} selected={selected}: highlight on wrong row"
+            );
+        }
+    }
+
+    /// The proportional bar is the at-a-glance cue; it must actually be coloured.
+    #[test]
+    fn bars_render_in_green() {
+        let mut app = synthetic_app(4);
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        // Find any full-block glyph and check its foreground.
+        let mut found = false;
+        for y in 2..8u16 {
+            for x in 0..80u16 {
+                if buf[(x, y)].symbol() == "█" {
+                    assert_eq!(
+                        buf[(x, y)].style().fg,
+                        Some(Color::Green),
+                        "bar glyph at ({x},{y}) is not green"
+                    );
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "no bar glyphs rendered at all");
+    }
+
     #[test]
     fn window_empty_directory() {
         let mut app = synthetic_app(0);
