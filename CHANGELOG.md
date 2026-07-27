@@ -48,9 +48,14 @@ reads and `BAAD` records rejected, malformed attribute chains terminating,
 random bytes never panicking, and stale or missing parent references attaching
 to an orphan container rather than to a recycled directory slot.
 
-The two scanners do not report identical totals, by design. Hard-linked files
-are counted once per link by the walk and once in total by the MFT, so the walk
-reports more for trees like `C:\Windows`. `crosscheck` quantifies the delta.
+Validated against the directory walk on a real volume: 8,680 directories present
+in both scanners, all 8,680 byte-for-byte identical, 100.00% agreement, no
+orphaned records. A full 2 TB volume with 5.54M files scans in 10-21 s, against
+41 s for a cold walk of a single 1.6M-file subtree.
+
+The two scanners do not always report identical totals, by design. Hard-linked
+files are counted once per link by the walk and once in total by the MFT, so the
+walk reports more for trees like `C:\Windows`. `crosscheck` quantifies the delta.
 
 ### Fixed
 

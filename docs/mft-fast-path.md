@@ -32,11 +32,12 @@ no elevation). Compare 41 s cold for a 1.6M-file *subtree* today. Note the cost
 scales with MFT **size**, not live file count: roughly half those slots are dead
 and interleaved, and nothing can skip them.
 
-Do not quote a projected scan time here. An early estimate of 5-7 s came from
-assuming ~1.7 GB/s; the raw device measured 411 MB/s at queue depth 1, which
-projected 16.7 s instead. The real figure depends on concurrency (below) and on
-where the MFT sits on the device, so it belongs in a measurement from
-`examples/crosscheck.rs`, not in a design note.
+Measured, not projected: a full `C:` scan takes **10.3 to 21.1 s** across repeated
+runs (327-669 MB/s of `$MFT`), against 41 s for a cold walk of one 1.6M-file
+subtree. Two earlier estimates in this file were wrong in both directions — 5-7 s
+from assuming ~1.7 GB/s, then 16.7 s from a queue-depth-1 probe — which is why
+the figure above comes from the real scan. Note the 2x run-to-run spread on
+identical input; quote a range, never a single number.
 
 ## Hard constraints, measured not assumed
 
@@ -180,15 +181,36 @@ disk — the bottleneck. Calibrating on the same drive with unbuffered 16 MiB re
 
 The knee is at 4 and it plateaus by 8, which is the default. Each reader opens
 its own handle: a shared file pointer would serialise the very seeks being
-overlapped. Note the gap between 1774 MB/s here and 411 MB/s on the raw device at
-the same depth — the MFT region and a freshly written file are not equivalent on
-a DRAM-less drive, so treat the absolute figures as device-dependent and the
-~2x concurrency scaling as the transferable result.
+overlapped.
+
+Confirmed on the real thing. `DISKTREE_MFT_TIMING=1` reports summed reader time
+over wall time, and a full scan shows **6.3-7.1x overlap** — the readers really do
+run concurrently against the raw volume. Parsing takes only ~2.5 s of a 10-21 s
+scan, so the device is the constraint and the parser has ample headroom; there is
+no case for overlapped I/O or IOCP.
+
+Treat the absolute figures as device-dependent: a freshly written file read at
+1774 MB/s while the raw volume managed 327-669 MB/s, and the MFT region of a
+DRAM-less drive is not equivalent to either. The transferable result is that
+concurrency is worth roughly 2x and that 8 readers is safely on the plateau.
 
 Gate it: use the fast path only when elevated, the filesystem is NTFS, and the
 requested path is the volume root; `--mft` to force, `--no-mft` to disable. Fall
 back to the directory walk with a visible one-line notice, never a panic and
 never a self-triggered UAC prompt.
+
+## Validation result
+
+The cross-check passed on the development machine: a whole-volume MFT scan
+against a walk of a 244,199-file subtree gave **8,680 directories present in
+both, 8,680 byte-for-byte identical, 100.00% agreement**, no orphaned records,
+and target totals equal to the byte (10.517 GB each). Whole-volume total was
+1783.54 GB against 1.82 TB of used space.
+
+That one result exercises fixups, resident and non-resident sizing, extension
+merging, DOS-name deduplication, alternate-stream exclusion and parent linking
+simultaneously, which is why it is worth more than any single unit test. Keep it
+working.
 
 ## The test that decides whether it is correct
 

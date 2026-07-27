@@ -135,7 +135,18 @@ The default is 8, on the plateau; `--mft-readers` overrides it. Recalibrate on y
 cargo run --release --example iocal -- <a-file-of-at-least-512MB>
 ```
 
-Two honest caveats. The cost is proportional to the **size of the MFT**, not to how many files are live: on the development machine `$MFT` is 6.87 GB over 6.7M record slots, roughly half of which are dead-but-interleaved, so about half the read is unavoidable waste. And a volume with a small MFT sees correspondingly less benefit. Check yours with:
+### Measured
+
+Full `C:` on the development machine — 2 TB volume, 5.54M files, 6.91 GB of `$MFT` in 35 fragments:
+
+| | |
+|---|---|
+| Whole-volume MFT scan | **10–21 s** (327–669 MB/s of `$MFT`) |
+| Directory walk, cold, of one 1.6M-file subtree | 41 s |
+
+The spread is real: repeated scans of the same volume ranged from 10.3 s to 21.1 s depending on device state, so treat any single figure sceptically — including these. Reader overlap measured 6.3–7.1x, and parsing accounts for only ~2.5 s of it, so this is bound on the device rather than on CPU.
+
+Two caveats. The cost is proportional to the **size of the MFT**, not to how many files are live, so a volume whose MFT holds many dead records pays for them. And a volume with a small MFT sees correspondingly less benefit. Check yours with:
 
 ```bash
 cargo run --release --example mftprobe -- C
@@ -154,6 +165,8 @@ You can quantify this on your own machine — it is the tool's main correctness 
 ```bash
 cargo run --release --example crosscheck -- "C:\some\subtree"
 ```
+
+On the development machine, comparing a whole-volume MFT scan against a walk of a 244,199-file subtree: **8,680 directories present in both, 8,680 byte-for-byte identical, 100.00% agreement**, and no orphaned records. That subtree contains no hard links, which is why it matches exactly; expect a delta on trees like `C:\Windows` that do.
 
 ## Troubleshooting
 
