@@ -72,9 +72,14 @@ pub struct Record {
     pub base: Option<u32>,
     /// Best filename, with DOS 8.3 aliases discarded.
     pub name: Option<OsString>,
+    /// This record's own sequence number, incremented by NTFS each time the slot
+    /// is reused. A child's [`Self::parent_seq`] must match its parent's value
+    /// here, or the parent slot has been recycled into a different directory.
+    pub sequence: u16,
     /// Record number of the containing directory.
     pub parent: Option<u32>,
-    /// Sequence number of the parent, used to detect a recycled directory record.
+    /// Sequence number the child recorded for its parent. Compare against the
+    /// parent's [`Self::sequence`].
     pub parent_seq: u16,
     /// Apparent size of the unnamed `$DATA` stream.
     pub size: u64,
@@ -267,6 +272,7 @@ pub fn parse_record(rec: &[u8], expected_number: u32) -> Result<Record, RecordEr
         return Err(RecordError::NotARecord);
     }
     let flags = u16_at(rec, 0x16).ok_or(RecordError::Malformed)?;
+    let sequence = u16_at(rec, 0x10).ok_or(RecordError::Malformed)?;
     let self_number = u32_at(rec, 0x2C).ok_or(RecordError::Malformed)?;
     // A slot that disagrees about its own identity means the read landed in the
     // wrong place; trusting it would attach files to arbitrary parents.
@@ -334,6 +340,7 @@ pub fn parse_record(rec: &[u8], expected_number: u32) -> Result<Record, RecordEr
     Ok(Record {
         number: expected_number,
         base,
+        sequence,
         name: best.map(|(n, _)| n),
         parent,
         parent_seq,
@@ -400,7 +407,7 @@ pub struct TreeNode {
 /// Records whose parent is missing, not in use, or has a mismatched sequence
 /// number are attached to a synthetic orphan directory rather than to whatever
 /// now occupies the recycled parent slot.
-pub fn build_tree(records: &[Option<Record>], sequences: &[u16]) -> Vec<TreeNode> {
+pub fn build_tree(records: &[Option<Record>]) -> Vec<TreeNode> {
     let mut children: Vec<Vec<u32>> = vec![Vec::new(); records.len()];
     let mut orphans: Vec<u32> = Vec::new();
 
@@ -415,13 +422,12 @@ pub fn build_tree(records: &[Option<Record>], sequences: &[u16]) -> Vec<TreeNode
             // The root's parent is itself; anything else claiming the root as a
             // parent is fine, but a self-referential non-root record is not.
             Some(p) if (p as usize) < records.len() && p != r.number => {
-                let parent_live = records
-                    .get(p as usize)
-                    .is_some_and(|slot| slot.as_ref().is_some_and(|pr| pr.is_dir));
-                let seq_ok = sequences
-                    .get(p as usize)
-                    .is_none_or(|&s| s == 0 || s == r.parent_seq);
-                parent_live && seq_ok
+                match records.get(p as usize).and_then(|slot| slot.as_ref()) {
+                    // A recycled slot now holds a different file, so a mismatched
+                    // sequence number means this parent reference is stale.
+                    Some(pr) => pr.is_dir && pr.sequence == r.parent_seq,
+                    None => false,
+                }
             }
             _ => false,
         };
@@ -858,6 +864,7 @@ mod tests {
         Some(Record {
             number,
             base: None,
+            sequence: 1,
             name: Some(OsString::from(name)),
             parent: Some(parent),
             parent_seq: 1,
@@ -871,6 +878,7 @@ mod tests {
         Some(Record {
             number,
             base: None,
+            sequence: 1,
             name: Some(OsString::from(name)),
             parent: Some(parent),
             parent_seq: 1,
@@ -880,6 +888,66 @@ mod tests {
         })
     }
 
+    /// Drive real records through `parse_record` and into `build_tree`, which the
+    /// other tree tests do not: they hand-build `Record`s and so cannot catch a
+    /// field being populated wrongly on the way in. A version of this module
+    /// stored the *parent's* sequence number at each record's own index, which
+    /// made every parent reference look stale and dumped the entire volume into
+    /// the orphan container while every isolated unit test still passed.
+    #[test]
+    fn parsed_records_link_into_a_real_tree() {
+        let root = fixed_up(
+            RecordBuilder::new(ROOT_RECORD, FLAG_IN_USE | FLAG_DIRECTORY)
+                .file_name(ROOT_RECORD, ".", NAME_WIN32)
+                .build(),
+        );
+        let dir = fixed_up(
+            RecordBuilder::new(64, FLAG_IN_USE | FLAG_DIRECTORY)
+                .file_name(ROOT_RECORD, "Users", NAME_WIN32)
+                .build(),
+        );
+        let sub = fixed_up(
+            RecordBuilder::new(65, FLAG_IN_USE | FLAG_DIRECTORY)
+                .file_name(64, "dawmo", NAME_WIN32)
+                .build(),
+        );
+        let leaf = fixed_up(
+            RecordBuilder::new(66, FLAG_IN_USE)
+                .file_name(65, "notes.txt", NAME_WIN32)
+                .resident_data(1234)
+                .build(),
+        );
+
+        let mut records: Vec<Option<Record>> = vec![None; 70];
+        for (bytes, n) in [(&root, ROOT_RECORD), (&dir, 64), (&sub, 65), (&leaf, 66)] {
+            records[n as usize] = Some(parse_record(bytes, n).expect("record parses"));
+        }
+        let tree = build_tree(&records);
+
+        // Nothing may land in the orphan container.
+        assert!(
+            !tree.iter().any(|n| n.name == "$Orphaned"),
+            "records were orphaned: {:?}",
+            tree.iter()
+                .map(|n| n.name.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        );
+
+        // And the chain must be root -> Users -> dawmo -> notes.txt.
+        let idx = |name: &str| {
+            tree.iter()
+                .position(|n| n.name == name)
+                .unwrap_or_else(|| panic!("{name} missing from tree"))
+        };
+        let users = idx("Users");
+        let dawmo = idx("dawmo");
+        let notes = idx("notes.txt");
+        assert_eq!(tree[users].parent, 0);
+        assert_eq!(tree[dawmo].parent, users);
+        assert_eq!(tree[notes].parent, dawmo);
+        assert_eq!(tree[notes].size, 1234);
+    }
+
     #[test]
     fn tree_is_breadth_first_with_parents_before_children() {
         let mut records: Vec<Option<Record>> = vec![None; 40];
@@ -887,9 +955,7 @@ mod tests {
         records[20] = dir(20, ROOT_RECORD, "sub");
         records[21] = file(21, 20, "inner.txt", 500);
         records[22] = file(22, ROOT_RECORD, "top.txt", 100);
-        let sequences = vec![1u16; 40];
-
-        let tree = build_tree(&records, &sequences);
+        let tree = build_tree(&records);
         assert_eq!(tree[0].record, ROOT_RECORD);
         for (i, n) in tree.iter().enumerate().skip(1) {
             assert!(
@@ -912,7 +978,7 @@ mod tests {
     fn root_self_cycle_terminates() {
         let mut records: Vec<Option<Record>> = vec![None; 40];
         records[ROOT_RECORD as usize] = dir(ROOT_RECORD, ROOT_RECORD, "C:");
-        let tree = build_tree(&records, &[1u16; 40]);
+        let tree = build_tree(&records);
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].parent, 0);
     }
@@ -928,9 +994,10 @@ mod tests {
         stale.parent_seq = 99;
         records[30] = Some(stale);
 
-        let mut sequences = vec![1u16; 40];
-        sequences[20] = 7; // parent slot was reused
-        let tree = build_tree(&records, &sequences);
+        // The parent slot was recycled: its sequence moved on from what the child
+        // recorded, so the child's reference is stale.
+        records[20].as_mut().unwrap().sequence = 7;
+        let tree = build_tree(&records);
 
         let orphan_root = tree
             .iter()
@@ -948,7 +1015,7 @@ mod tests {
         let mut records: Vec<Option<Record>> = vec![None; 40];
         records[ROOT_RECORD as usize] = dir(ROOT_RECORD, ROOT_RECORD, "C:");
         records[31] = file(31, 25, "nowhere.txt", 10); // record 25 does not exist
-        let tree = build_tree(&records, &[1u16; 40]);
+        let tree = build_tree(&records);
         assert!(
             tree.iter().any(|n| n.name == "nowhere.txt"),
             "a file with a missing parent was silently dropped"

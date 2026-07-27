@@ -80,6 +80,26 @@ fn main() {
         vol.mft_bytes() as f64 / 1e6 / t0.elapsed().as_secs_f64().max(1e-9)
     );
 
+    // A broken parent link does not change the total, it just moves everything
+    // under the orphan container, so the totals alone cannot reveal it.
+    if let Some(orphan) = mft_tree.nodes[mft_tree.root]
+        .children
+        .iter()
+        .copied()
+        .find(|&c| mft_tree.nodes[c].name == "$Orphaned")
+    {
+        let n = &mft_tree.nodes[orphan];
+        let pct = n.n_files as f64 / mft_tree.nodes[mft_tree.root].n_files.max(1) as f64 * 100.0;
+        println!(
+            "  orphaned: {} files, {:.2} GB ({pct:.2}% of files) — a large share means \
+             parent linking is broken",
+            n.n_files,
+            n.size as f64 / 1e9,
+        );
+    } else {
+        println!("  orphaned: none");
+    }
+
     println!("\ndirectory walk of {}…", target.display());
     let p2 = ScanProgress::default();
     let t1 = std::time::Instant::now();

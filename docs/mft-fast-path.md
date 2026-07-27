@@ -129,6 +129,19 @@ returned LCNs.
    missing or not in use, attach to a synthetic orphan node rather than to a
    recycled directory. Emit in BFS order so `parent < child`.
 
+   Compare a child's recorded parent sequence against **the parent record's own
+   sequence number**, which means every record must carry its own
+   (`sequence_number@0x10`). An earlier version kept sequences in a parallel array
+   that the caller filled with each record's *parent's* sequence instead, so every
+   comparison failed and the whole volume landed in the orphan container — while
+   the total size stayed correct, because orphaned files still aggregate. Every
+   isolated unit test passed too, since they populated that array by hand and so
+   honoured a contract the real caller broke. `build_tree` now reads the sequence
+   from the `Record`, deleting the parallel array and that whole class of bug, and
+   `parsed_records_link_into_a_real_tree` drives `parse_record` output into
+   `build_tree` to cover the seam. Watch the orphan share: it should be a handful
+   of files, not a percentage.
+
 Declare `BY_HANDLE_FILE_INFORMATION` and `NTFS_VOLUME_DATA_BUFFER` from
 `windows-sys`, never by hand: getting one field's type wrong shifts every later
 field by the resulting padding and silently produces absurd values. Take the

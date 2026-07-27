@@ -571,21 +571,19 @@ pub fn scan(vol: &Volume, progress: &ScanProgress, readers: Option<usize>) -> io
             .collect()
     });
 
-    // Scatter into a slot array. Sequence numbers come along so build_tree can
-    // reject a parent reference whose slot has since been recycled.
+    // Scatter into a slot array indexed by record number, which is what
+    // build_tree resolves parent references against.
     let mut records: Vec<Option<Record>> = vec![None; slots];
-    let mut sequences: Vec<u16> = vec![0; slots];
     for batch in collected {
         for (n, r) in batch {
             if let Some(slot) = records.get_mut(n as usize) {
-                sequences[n as usize] = r.parent_seq;
                 *slot = Some(r);
             }
         }
     }
 
     let merged = merge_extension_records(&mut records);
-    let nodes = build_tree(&records, &sequences);
+    let nodes = build_tree(&records);
     drop(records);
 
     let n_files: u64 = nodes.iter().filter(|n| !n.is_dir).count() as u64;
