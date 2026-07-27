@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-07-26
 
 ### Added
 
@@ -27,8 +27,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `examples/iocal.rs`, which calibrates read concurrency on any machine without
   needing elevation, and `examples/crosscheck.rs`, which scans a subtree both
   ways and diffs every shared directory.
+- `--threads`/`-j` to set the number of concurrent directory reads.
+- `examples/bench.rs`, a scan benchmark reporting files/s and dirs/s, with a
+  `--split` mode for A/B comparisons against a single-use cold cache.
+- `examples/probe.rs`, which reports which volume access masks and USN ioctls the
+  current privilege level allows.
+- Crate-level documentation with a running doctest, docs for the whole `index`
+  API, and a README section explaining exactly what the reported sizes include.
 
-### Notes on correctness
+### Correctness
 
 The MFT parser's size and structure logic is pure functions over byte slices,
 covered by 17 tests driving synthetic records. Two of the cases fail silently if
@@ -44,8 +51,6 @@ to an orphan container rather than to a recycled directory slot.
 The two scanners do not report identical totals, by design. Hard-linked files
 are counted once per link by the walk and once in total by the MFT, so the walk
 reports more for trees like `C:\Windows`. `crosscheck` quantifies the delta.
-
-## [0.2.0] - 2026-07-26
 
 ### Fixed
 
@@ -90,21 +95,11 @@ reports more for trees like `C:\Windows`. `crosscheck` quantifies the delta.
   and the displayed current path is sampled rather than formatted for every
   directory.
 
-### Added
-
-- `--threads`/`-j` to set the number of concurrent directory reads.
-- `examples/bench.rs`, a scan benchmark reporting files/s and dirs/s, with a
-  `--split` mode for A/B comparisons against a single-use cold cache.
-- `examples/probe.rs`, which reports which volume access masks and USN ioctls the
-  current privilege level allows — the groundwork for an MFT-based fast scan.
-- Crate-level documentation with a running doctest, docs for the whole `index`
-  API, and a README section explaining exactly what the reported sizes include.
-
 ### Notes
 
 `app` and `ui` are now `#[doc(hidden)]`. Their signatures name `ratatui` types,
 so treating them as public API would make every `ratatui` release a breaking
-change here. `index` is the supported surface.
+change here. `index` and `mft` are the supported surface.
 
 ## [0.1.0] - 2026-07-26
 
