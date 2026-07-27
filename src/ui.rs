@@ -245,7 +245,22 @@ fn draw_deleting(f: &mut Frame, count: usize) {
     );
 }
 
-pub fn draw_scanning(f: &mut Frame, root: &Path, progress: &ScanProgress, elapsed: Duration) {
+/// Which scanner is running, since the two report progress in different units.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ScanMode {
+    /// Walking directories: counts folders and files as it goes.
+    Walk,
+    /// Reading the NTFS MFT: counts record slots and bytes of `$MFT`.
+    Mft,
+}
+
+pub fn draw_scanning(
+    f: &mut Frame,
+    root: &Path,
+    progress: &ScanProgress,
+    elapsed: Duration,
+    mode: ScanMode,
+) {
     let area = centered(72, 9, f.area());
     let spinner = SPINNER[(elapsed.as_millis() / 80) as usize % SPINNER.len()];
 
@@ -262,17 +277,35 @@ pub fn draw_scanning(f: &mut Frame, root: &Path, progress: &ScanProgress, elapse
     let max_path = area.width.saturating_sub(14) as usize;
     let shown_path = truncate_left(&current, max_path);
 
-    let mut lines = vec![
-        Line::from(format!("{spinner}  Scanning {}", root.display())).bold(),
-        Line::default(),
-        Line::from(format!(
+    let heading = match mode {
+        ScanMode::Walk => format!("{spinner}  Scanning {}", root.display()),
+        ScanMode::Mft => format!("{spinner}  Reading $MFT for {}", root.display()),
+    };
+    // An MFT scan has no notion of "folders visited"; it streams record slots, so
+    // reusing the walk's labels would misreport what is happening.
+    let counts = match mode {
+        ScanMode::Walk => format!(
             "{} folders    {} files    {}",
             format_count(dirs),
             format_count(files),
             format_size(bytes)
-        )),
-        Line::from(format!("unreadable: {}", format_count(errors)))
-            .style(Style::new().fg(Color::DarkGray)),
+        ),
+        ScanMode::Mft => format!(
+            "{} records    {} read",
+            format_count(dirs),
+            format_size(bytes)
+        ),
+    };
+    let errors_label = match mode {
+        ScanMode::Walk => format!("unreadable: {}", format_count(errors)),
+        ScanMode::Mft => format!("skipped records: {}", format_count(errors)),
+    };
+
+    let mut lines = vec![
+        Line::from(heading).bold(),
+        Line::default(),
+        Line::from(counts),
+        Line::from(errors_label).style(Style::new().fg(Color::DarkGray)),
         Line::from(format!("in: {shown_path}")).style(Style::new().fg(Color::DarkGray)),
         Line::from(format!("elapsed: {:.1} s", elapsed.as_secs_f64())),
         Line::default(),

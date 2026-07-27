@@ -4,6 +4,47 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **MFT fast scan for elevated NTFS volumes.** Instead of one metadata read per
+  directory, the whole volume's file table is read in a streaming pass. Used
+  automatically when the volume is NTFS, the raw device is readable, and the
+  target is the volume root; `--mft` forces it for a subdirectory and `--no-mft`
+  disables it. Anything else falls back to the directory walk with a one-line
+  explanation rather than an error.
+- **Automatic elevation.** A whole-volume scan without privileges relaunches
+  itself elevated in a new window, since a console process cannot gain
+  privileges in place. `--no-elevate` opts out, and the relaunched process
+  carries an internal flag so a failed probe cannot produce an elevation loop.
+- `--mft-readers` for read concurrency during an MFT scan, defaulting to 8.
+  Measured on the development NVMe drive, unbuffered 16 MiB reads scale 1774 →
+  3613 MB/s from 1 to 8 concurrent readers and plateau there.
+- `examples/mftprobe.rs`, a go/no-go check that runs the whole privileged
+  sequence with no parser attached, so a failure names one API. Also reports
+  bandwidth against concurrency.
+- `examples/iocal.rs`, which calibrates read concurrency on any machine without
+  needing elevation, and `examples/crosscheck.rs`, which scans a subtree both
+  ways and diffs every shared directory.
+
+### Notes on correctness
+
+The MFT parser's size and structure logic is pure functions over byte slices,
+covered by 17 tests driving synthetic records. Two of the cases fail silently if
+got wrong and are worth naming: resident `$DATA` must be sized from the
+attribute's value length, or every small file — most files by count — reports
+zero bytes; and `$ATTRIBUTE_LIST` spillover must be merged into the base record,
+or the largest fragmented files report zero. Also covered: DOS 8.3 aliases
+deduplicated, continuation extents ignored, alternate streams excluded, torn
+reads and `BAAD` records rejected, malformed attribute chains terminating,
+random bytes never panicking, and stale or missing parent references attaching
+to an orphan container rather than to a recycled directory slot.
+
+The two scanners do not report identical totals, by design. Hard-linked files
+are counted once per link by the walk and once in total by the MFT, so the walk
+reports more for trees like `C:\Windows`. `crosscheck` quantifies the delta.
+
 ## [0.2.0] - 2026-07-26
 
 ### Fixed

@@ -12,7 +12,8 @@ A disk usage analyzer for your terminal, in the spirit of [WizTree](https://disk
  ↑↓ move  ⏎ open  ⌫ up  space mark  c clear  d → recycle bin  D delete forever  r rescan  q quit
 ```
 
-- **Parallel scan** with live progress, and a size-sorted view of every directory
+- **Two scanners**: a parallel directory walk that works anywhere, and on elevated NTFS an MFT reader that streams the whole volume's metadata in one pass
+- **Live progress**, and a size-sorted view of every directory
 - **Marks and safe deletion**: mark any number of entries, then send them to the **Recycle Bin** or delete permanently, always behind a confirmation that lists the **full path** of everything about to go
 - Sizes update in place after a delete — no rescan needed
 - Unreadable directories are counted and reported, never fatal
@@ -38,6 +39,14 @@ disktree --path D:\Games     # scan a specific directory
 
 ```bash
 disktree --threads 128       # more concurrent directory reads (see Performance)
+```
+
+```bash
+disktree --no-mft            # always walk directories, never read the MFT
+```
+
+```bash
+disktree --no-elevate        # do not relaunch as administrator
 ```
 
 ## Keys
@@ -71,7 +80,7 @@ Disk usage tools disagree with each other and with Explorer, always for the same
 
 WizTree's default column is *allocated* size, so it will not match this tool. That is not a bug in either.
 
-**Hard links are counted once per link.** A directory walk cannot tell that two entries share the same data, so a file with three hard links contributes its size three times. `C:\Windows` uses hard links heavily, which is one reason a full system scan overstates.
+**Hard links are counted once per link by the directory walk, and once in total by the MFT scan.** A directory entry cannot tell that two names share the same data, so the walk contributes a three-link file's size three times. `C:\Windows` uses hard links heavily, which is why the two scanners report different totals for it — see [Do the two scanners agree?](#do-the-two-scanners-agree) below. The MFT scan also attaches a multi-linked file to one parent, so it appears in one directory only.
 
 **Alternate data streams are not counted.** Only the main stream of each file.
 
@@ -98,15 +107,53 @@ cargo run --release --example bench -- "C:\some\path" 3
 
 `--threads` controls how many directories are read concurrently, defaulting to twice your core count. Cold scanning leaves workers blocked on the device rather than busy on the CPU, so a larger pool can raise throughput; on this machine that could not be demonstrated (with 64 GB of RAM the NTFS metadata cache never evicts, and dropping it requires privileges), and warm throughput is flat from 16 to 128 threads. If you scan large cold trees regularly, try `--threads 128` and measure.
 
-### Why not as fast as WizTree?
+### The MFT fast scan
 
-WizTree reads the NTFS Master File Table directly — one large sequential read instead of walking directories — which is why it can do a whole volume in seconds. That requires Administrator: raw volume access (`FILE_READ_DATA` on `\\.\C:`) returns `ERROR_ACCESS_DENIED` without it, and so does `FSCTL_ENUM_USN_DATA`. You can confirm what your privilege level allows with:
+On NTFS, `disktree` can skip directory traversal entirely and read the volume's Master File Table — one large streaming pass over a single file that describes every file on the volume. This is the technique WizTree uses.
+
+It needs Administrator, because raw volume access (`FILE_READ_DATA` on `\\.\C:`) returns `ERROR_ACCESS_DENIED` otherwise. When you scan a whole volume without elevation, `disktree` relaunches itself elevated in a new window (a console process cannot gain privileges in place). Suppress that with `--no-elevate`, and force the walk with `--no-mft`.
+
+The fast path is used when all of these hold, and the directory walk runs otherwise with a one-line explanation in the status bar:
+
+- the volume is NTFS
+- the process can read the raw volume
+- the requested path is the volume root — the MFT describes an entire volume, so reading it to show one subdirectory would be slower than walking that subdirectory. `--mft` forces it anyway.
+
+Reader concurrency matters more than you might expect. A synchronous read loop keeps one request outstanding, which leaves an NVMe device far short of its sequential peak. Measured on the development machine with unbuffered 16 MiB reads:
+
+| Concurrent readers | Throughput |
+|---|---|
+| 1 | 1774 MB/s |
+| 2 | 3321 MB/s |
+| 4 | 3595 MB/s |
+| 8 | 3613 MB/s |
+| 16 | 3390 MB/s |
+
+The default is 8, on the plateau; `--mft-readers` overrides it. Recalibrate on your own hardware with:
 
 ```bash
-cargo run --release --example probe -- C
+cargo run --release --example iocal -- <a-file-of-at-least-512MB>
 ```
 
-An MFT-based fast path is the intended next step for this tool; it is not implemented yet. Until then `disktree` walks directories, which needs no privileges and works on any filesystem.
+Two honest caveats. The cost is proportional to the **size of the MFT**, not to how many files are live: on the development machine `$MFT` is 6.87 GB over 6.7M record slots, roughly half of which are dead-but-interleaved, so about half the read is unavoidable waste. And a volume with a small MFT sees correspondingly less benefit. Check yours with:
+
+```bash
+cargo run --release --example mftprobe -- C
+```
+
+### Do the two scanners agree?
+
+Not exactly, and the differences are expected rather than bugs:
+
+- **Hard links.** The MFT counts a file once no matter how many names it has; the walk counts it once per name, because a directory entry cannot tell that two names share the same extents. So the walk reports *more* for trees like `C:\Windows`.
+- **Reparse points.** Zero bytes to the walk; whatever its own record says to the MFT.
+- **Permissions.** The walk skips what it cannot read; an elevated MFT scan sees everything.
+
+You can quantify this on your own machine — it is the tool's main correctness test:
+
+```bash
+cargo run --release --example crosscheck -- "C:\some\subtree"
+```
 
 ## Troubleshooting
 

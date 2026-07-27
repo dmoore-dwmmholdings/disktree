@@ -10,6 +10,10 @@
 //! are pure functions over byte slices, and the unit tests drive them with
 //! synthetic records covering each way a real volume can produce a wrong answer.
 
+mod io;
+
+pub use io::{Capability, DEFAULT_READERS, Volume, calibrate_readers, probe, scan};
+
 use std::ffi::OsString;
 
 /// Bytes per MFT record on every NTFS volume in practice, and the value used to

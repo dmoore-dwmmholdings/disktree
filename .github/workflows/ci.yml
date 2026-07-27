@@ -24,8 +24,24 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets
-      - run: cargo test --all-targets
+
+      # The MFT diagnostics (probe, mftprobe) read raw NTFS volumes and exist
+      # only on Windows, so the Linux job checks the portable library and binary
+      # rather than pretending those examples build everywhere.
+      - name: clippy (windows, everything)
+        if: runner.os == 'Windows'
+        run: cargo clippy --all-targets
+      - name: clippy (linux, portable targets)
+        if: runner.os != 'Windows'
+        run: cargo clippy --lib --bins
+
+      - name: test (windows, everything)
+        if: runner.os == 'Windows'
+        run: cargo test --all-targets
+      - name: test (linux, portable targets)
+        if: runner.os != 'Windows'
+        run: cargo test --lib --bins
+
       - run: cargo test --doc
 
   msrv:

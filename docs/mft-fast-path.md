@@ -1,7 +1,15 @@
 # Design note: NTFS MFT fast scan
 
-Status: **not implemented.** This records what was established before writing
-any code, so the work is resumable without re-deriving it.
+Status: **implemented** in `src/mft.rs` (parsing, unit-tested) and
+`src/mft/io.rs` (volume access). This records why each decision was made, and
+what was measured rather than assumed.
+
+Milestone zero passed on the development machine: `FILE_READ_DATA` on `\\.\C:`
+succeeds when elevated, `FSCTL_GET_RETRIEVAL_POINTERS` mapped `$MFT` across **35
+fragments** covering `MftValidDataLength` exactly, and record 0 validated its
+fixups and self-identified as `$MFT`. That last result is the one that matters:
+it proves geometry, extent mapping, aligned raw reads and the fixup logic are
+all correct together.
 
 ## Why
 
@@ -18,12 +26,17 @@ per-entry optimisation matters; only changing the *access pattern* does. Reading
 the Master File Table turns scattered per-directory index reads into one large
 sequential read, which is how WizTree scans a volume in seconds.
 
-`C:`'s MFT on the development machine is 6,750,732,288 bytes over 6,592,512
-record slots at 1024 bytes each. At a measured ~1.7 GB/s that is ~4 s of I/O,
-plus tree assembly — call it 5-7 s for a whole volume, against 41 s for a
-1.6M-file *subtree* today. Note the cost scales with MFT **size**, not live file
-count: roughly half those slots are dead and interleaved, and nothing can skip
-them.
+`C:`'s MFT on the development machine is 6,866,075,648 bytes over 6,705,152
+record slots at 1024 bytes each (from `FSCTL_GET_NTFS_VOLUME_DATA`, which needs
+no elevation). Compare 41 s cold for a 1.6M-file *subtree* today. Note the cost
+scales with MFT **size**, not live file count: roughly half those slots are dead
+and interleaved, and nothing can skip them.
+
+Do not quote a projected scan time here. An early estimate of 5-7 s came from
+assuming ~1.7 GB/s; the raw device measured 411 MB/s at queue depth 1, which
+projected 16.7 s instead. The real figure depends on concurrency (below) and on
+where the MFT sits on the device, so it belongs in a measurement from
+`examples/crosscheck.rs`, not in a design note.
 
 ## Hard constraints, measured not assumed
 
@@ -125,19 +138,39 @@ record stride from `BytesPerFileRecordSegment`, not
 
 ## Order of work
 
-**Milestone zero, before any parser:** an elevated run that opens the volume with
-`FILE_READ_DATA`, maps `$MFT` via the ioctl, and asserts
-`sum(extent clusters) * bytes_per_cluster >= MftValidDataLength`. Everything above
-about the elevated case rests on documentation, not measurement, because the
-development environment could not elevate. **If that fails, this design is
-unbuildable and the walker is the ceiling.**
+**Milestone zero, before any parser** — done, via `examples/mftprobe.rs`: an
+elevated run that opens the volume with `FILE_READ_DATA`, maps `$MFT` via the
+ioctl, asserts `sum(extent clusters) * bytes_per_cluster >= MftValidDataLength`,
+and reads record 0 to confirm its fixups apply and it identifies as `$MFT`. That
+check exists so a failure names one API instead of pointing somewhere inside the
+parser; keep it working.
 
-Then: read 16 MiB chunks (measured 672 MB/s at 1 MiB, 1183 at 4, 1709 at 16, 1955
-at 64 — 16 MiB is 87% of peak at a quarter of the pinned memory) with
-`FILE_FLAG_NO_BUFFERING`, which requires offset, length *and* buffer address all
-sector-aligned. Stop at `MftValidDataLength`. One reader thread feeding rayon is
-ample: parsing measures ~3.4M records/s serial against a ~1.7 GB/s device, so
-overlapped I/O and IOCP are unnecessary.
+Then: read 16 MiB chunks with `FILE_FLAG_NO_BUFFERING`, which requires offset,
+length *and* buffer address all sector-aligned. Stop at `MftValidDataLength`.
+
+**Corrected after measurement: use several concurrent readers, not one.** The
+research concluded a single reader thread was ample because parsing (~3.4M
+records/s) far outruns a device assumed to do ~1.7 GB/s. But a synchronous
+`ReadFile` loop keeps exactly one request outstanding, and the raw-volume probe
+measured only **411 MB/s** at that depth, which would make the reader — not the
+disk — the bottleneck. Calibrating on the same drive with unbuffered 16 MiB reads
+(`examples/iocal.rs`, no elevation needed):
+
+| Concurrent readers | MB/s | relative |
+|---|---|---|
+| 1 | 1774 | 1.00x |
+| 2 | 3321 | 1.87x |
+| 4 | 3595 | 2.03x |
+| 8 | 3613 | 2.04x |
+| 16 | 3390 | 1.91x |
+| 32 | 3518 | 1.98x |
+
+The knee is at 4 and it plateaus by 8, which is the default. Each reader opens
+its own handle: a shared file pointer would serialise the very seeks being
+overlapped. Note the gap between 1774 MB/s here and 411 MB/s on the raw device at
+the same depth — the MFT region and a freshly written file are not equivalent on
+a DRAM-less drive, so treat the absolute figures as device-dependent and the
+~2x concurrency scaling as the transferable result.
 
 Gate it: use the fast path only when elevated, the filesystem is NTFS, and the
 requested path is the volume root; `--mft` to force, `--no-mft` to disable. Fall
