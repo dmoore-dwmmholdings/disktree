@@ -51,6 +51,9 @@
 
 pub mod index;
 
+#[cfg(windows)]
+pub mod mft;
+
 // The UI layer is an implementation detail of the binary: its signatures name
 // `ratatui` types, so exposing it as documented API would make every ratatui
 // version bump a breaking change for this crate.

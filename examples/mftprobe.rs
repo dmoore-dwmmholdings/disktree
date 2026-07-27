@@ -252,6 +252,89 @@ fn first_file_name(rec: &[u8]) -> Option<String> {
     None
 }
 
+/// Measure raw read bandwidth against the number of concurrent readers.
+///
+/// A synchronous `ReadFile` loop keeps exactly one request outstanding, and an
+/// NVMe device needs many to reach its sequential peak. This decides whether the
+/// real scan uses one reader thread or several: if throughput scales, a single
+/// reader is the bottleneck rather than the disk.
+fn bandwidth_by_concurrency(
+    letter: &char,
+    base_off: i64,
+    extent_bytes: i64,
+    bps: usize,
+    chunk: usize,
+) {
+    println!("\n== 7. bandwidth vs concurrent readers ==");
+    // Stay inside the first extent so every reader touches real MFT territory.
+    let span = extent_bytes.min(192 * 1024 * 1024) as usize;
+    let device = format!("\\\\.\\{letter}:");
+
+    for readers in [1usize, 2, 4, 8, 16] {
+        let per = span / readers;
+        if per < chunk {
+            continue;
+        }
+        // Whole chunks only, so every request is sector-aligned.
+        let chunks_each = per / chunk;
+        let start = Instant::now();
+        let total: u64 = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..readers)
+                .map(|r| {
+                    let device = device.clone();
+                    s.spawn(move || {
+                        // Each thread opens its own handle: a shared file pointer
+                        // would serialise the seeks we are trying to overlap.
+                        let Ok(h) = open(
+                            &device,
+                            FILE_READ_DATA,
+                            FILE_FLAG_NO_BUFFERING | FILE_FLAG_SEQUENTIAL_SCAN,
+                        ) else {
+                            return 0u64;
+                        };
+                        let mut buf = AlignedBuf::new(chunk, bps.max(4096));
+                        let mut got_total = 0u64;
+                        for c in 0..chunks_each {
+                            let off = base_off + (r * per + c * chunk) as i64;
+                            let mut p = 0i64;
+                            // SAFETY: h is this thread's own valid device handle.
+                            unsafe { SetFilePointerEx(h, off, &mut p, FILE_BEGIN) };
+                            let mut n = 0u32;
+                            // SAFETY: buf is a live sector-aligned allocation of
+                            // `chunk` bytes owned solely by this thread.
+                            let ok = unsafe {
+                                ReadFile(
+                                    h,
+                                    buf.as_mut_slice().as_mut_ptr(),
+                                    chunk as u32,
+                                    &mut n,
+                                    std::ptr::null_mut(),
+                                )
+                            };
+                            if ok == 0 || n == 0 {
+                                break;
+                            }
+                            got_total += n as u64;
+                        }
+                        // SAFETY: opened in this thread and closed once.
+                        unsafe { CloseHandle(h) };
+                        got_total
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap_or(0)).sum()
+        });
+        let secs = start.elapsed().as_secs_f64();
+        let mbps = total as f64 / 1e6 / secs.max(1e-9);
+        println!(
+            "  {readers:>2} reader(s): {:>7.1} MB in {secs:.3} s = {mbps:>6.0} MB/s   (full MFT ≈ {:.1} s)",
+            total as f64 / 1e6,
+            6.87e9 / 1e6 / mbps.max(1.0),
+        );
+    }
+    println!("  pick the knee: past it, extra readers stop paying.");
+}
+
 fn main() {
     let letter = std::env::args()
         .nth(1)
@@ -493,9 +576,10 @@ fn main() {
     let secs = start.elapsed().as_secs_f64();
     let mbps = total as f64 / 1e6 / secs.max(1e-9);
     println!(
-        "  read {:.1} MB in {secs:.3} s = {mbps:.0} MB/s",
+        "  read {:.1} MB in {secs:.3} s = {mbps:.0} MB/s  (one request at a time)",
         total as f64 / 1e6
     );
+    bandwidth_by_concurrency(&letter, byte_off, first.clusters * bpc, bps, chunk);
     println!(
         "  => projected full MFT read: {:.1} s for {:.2} GB",
         vd.MftValidDataLength as f64 / 1e6 / mbps.max(1.0),
