@@ -93,6 +93,19 @@ fn main() {
         walk_tree.errors,
     );
 
+    /// Comparison key for a path.
+    ///
+    /// Both separators are folded to `\` and the case is lowered, because the two
+    /// trees are rooted differently: the MFT tree's root is the mount point, so
+    /// it always produces `C:\...`, while the walk's root is whatever the user
+    /// typed — and `C:/Users/x` would otherwise never match `C:\Users\x`.
+    fn key_of(p: &std::path::Path) -> String {
+        p.to_string_lossy()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_lowercase()
+    }
+
     // Index both trees by full path, directories only: a file's size is compared
     // through its parent's total, and per-file comparison would drown in noise
     // from files written between the two scans.
@@ -102,12 +115,7 @@ fn main() {
             if !t.nodes[i].is_dir {
                 continue;
             }
-            let key = t
-                .path_of(i)
-                .to_string_lossy()
-                .trim_end_matches('\\')
-                .to_lowercase();
-            m.insert(key, (t.nodes[i].size, t.nodes[i].n_files));
+            m.insert(key_of(&t.path_of(i)), (t.nodes[i].size, t.nodes[i].n_files));
         }
         m
     }
@@ -137,7 +145,20 @@ fn main() {
     println!("  byte-for-byte identical     : {identical}");
     println!("  differing                   : {}", diffs.len());
     if compared == 0 {
-        println!("\nNothing overlapped. Is the target on the scanned volume?");
+        // Show both key spaces rather than guessing: the usual cause is that the
+        // two trees are rooted differently, which is invisible from the totals.
+        println!("\nNothing overlapped, so the keys do not line up. Sample keys:");
+        let mut sa: Vec<&String> = a.keys().collect();
+        let mut sb: Vec<&String> = b.keys().collect();
+        sa.sort();
+        sb.sort();
+        for k in sa.iter().take(3) {
+            println!("  MFT : {k}");
+        }
+        for k in sb.iter().take(3) {
+            println!("  walk: {k}");
+        }
+        println!("Is the target on the scanned volume?");
         return;
     }
     println!(
@@ -155,14 +176,7 @@ fn main() {
         }
     }
 
-    let total_mft = a
-        .get(
-            &target
-                .to_string_lossy()
-                .trim_end_matches('\\')
-                .to_lowercase(),
-        )
-        .map(|v| v.0);
+    let total_mft = a.get(&key_of(&target)).map(|v| v.0);
     if let Some(m) = total_mft {
         let w = walk_tree.nodes[walk_tree.root].size;
         println!(

@@ -435,6 +435,12 @@ fn plan_jobs(vol: &Volume) -> Vec<Job> {
 }
 
 /// Read and parse one job's worth of records.
+/// Nanoseconds a job spent reading and parsing, for the throughput breakdown.
+struct JobTiming {
+    read: u128,
+    parse: u128,
+}
+
 fn run_job(
     h: &Handle,
     buf: &mut AlignedBuf,
@@ -442,7 +448,9 @@ fn run_job(
     vol: &Volume,
     out: &mut Vec<(u32, Record)>,
     torn: &mut u64,
+    timing: &mut JobTiming,
 ) -> Result<(), i32> {
+    let read_start = Instant::now();
     let mut pos = 0i64;
     // SAFETY: h is this thread's own device handle; pos receives the new offset.
     if unsafe { SetFilePointerEx(h.0, job.device_offset, &mut pos, FILE_BEGIN) } == 0 {
@@ -473,7 +481,9 @@ fn run_job(
         }
         filled += got as usize;
     }
+    timing.read += read_start.elapsed().as_nanos();
 
+    let parse_start = Instant::now();
     let rec_size = vol.record_size;
     let data = &mut buf.as_mut_slice()[..filled];
     for (i, rec) in data.chunks_exact_mut(rec_size).enumerate() {
@@ -490,6 +500,7 @@ fn run_job(
             out.push((number, r));
         }
     }
+    timing.parse += parse_start.elapsed().as_nanos();
     Ok(())
 }
 
@@ -511,6 +522,10 @@ pub fn scan(vol: &Volume, progress: &ScanProgress, readers: Option<usize>) -> io
     let next = AtomicUsize::new(0);
     let torn_total = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
+    // Summed across readers, so it exceeds wall time when they overlap. The ratio
+    // of this to wall time is what shows whether concurrency is actually working.
+    let read_nanos = AtomicUsize::new(0);
+    let parse_nanos = AtomicUsize::new(0);
 
     // Each reader owns its handle and buffer: a shared file pointer would
     // serialise the very seeks we are overlapping.
@@ -529,10 +544,13 @@ pub fn scan(vol: &Volume, progress: &ScanProgress, readers: Option<usize>) -> io
                     };
                     let mut buf = AlignedBuf::new(CHUNK, vol.bytes_per_sector.max(4096));
                     let mut torn = 0u64;
+                    let mut timing = JobTiming { read: 0, parse: 0 };
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(&job) = jobs.get(i) else { break };
-                        if run_job(&h, &mut buf, job, vol, &mut mine, &mut torn).is_err() {
+                        if run_job(&h, &mut buf, job, vol, &mut mine, &mut torn, &mut timing)
+                            .is_err()
+                        {
                             failed.fetch_add(1, Ordering::Relaxed);
                         }
                         progress.bytes.fetch_add(job.len as u64, Ordering::Relaxed);
@@ -541,6 +559,8 @@ pub fn scan(vol: &Volume, progress: &ScanProgress, readers: Option<usize>) -> io
                             .fetch_add((job.len / vol.record_size) as u64, Ordering::Relaxed);
                     }
                     torn_total.fetch_add(torn as usize, Ordering::Relaxed);
+                    read_nanos.fetch_add(timing.read as usize, Ordering::Relaxed);
+                    parse_nanos.fetch_add(timing.parse as usize, Ordering::Relaxed);
                     mine
                 })
             })
@@ -579,6 +599,22 @@ pub fn scan(vol: &Volume, progress: &ScanProgress, readers: Option<usize>) -> io
     progress.files.store(n_files, Ordering::Relaxed);
     if let Ok(mut cur) = progress.current.try_lock() {
         *cur = format!("merged {merged} extension records");
+    }
+
+    // Summed reader time over wall time shows the achieved overlap: near 1.0 means
+    // the readers are serialising and extra ones are not helping.
+    if std::env::var_os("DISKTREE_MFT_TIMING").is_some() {
+        let wall = start.elapsed().as_secs_f64();
+        let read = read_nanos.load(Ordering::Relaxed) as f64 / 1e9;
+        let parse = parse_nanos.load(Ordering::Relaxed) as f64 / 1e9;
+        eprintln!(
+            "  [mft] wall {wall:.3}s | readers {n_readers} | summed read {read:.3}s \
+             parse {parse:.3}s | overlap {:.2}x | read-only throughput {:.0} MB/s | \
+             merged {merged} | jobs {}",
+            (read + parse) / wall.max(1e-9),
+            vol.mft_valid_len as f64 / 1e6 / read.max(1e-9) * n_readers as f64,
+            jobs.len(),
+        );
     }
     Ok(tree)
 }
