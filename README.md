@@ -9,7 +9,7 @@ A disk usage analyzer for your terminal, in the spirit of [WizTree](https://disk
    39.2 GB   5.1% █                 77,498 Documents\
    20.2 GB   2.6%                   59,412 Dropbox\
     9.6 GB   1.3%                  244,164 .rustup\
- ↑↓ move  ⏎ open  ⌫ up  space mark  c clear  d → recycle bin  D delete forever  r rescan  q quit
+ ↑↓ move  enter open  backspace up  space mark  c clear  d → recycle bin  D delete forever  r rescan  q quit
 ```
 
 - **Two scanners**: a parallel directory walk that works anywhere, and on elevated NTFS an MFT reader that streams the whole volume's metadata in one pass
@@ -63,7 +63,8 @@ disktree --no-elevate        # do not relaunch as administrator
 | `d` | Delete marked (or selected) to the **Recycle Bin** |
 | `D` | Delete **permanently** |
 | `r` | Rescan |
-| `q` `Esc` | Quit |
+| `q` | Quit |
+| `Esc` | Ask to quit (`Esc` again quits, `Backspace` returns) |
 
 Marks persist while you navigate, so you can gather things from several directories and delete them in one pass. The footer shows how many are marked and their combined size; the confirmation dialog lists full paths, because two folders named `bin` are otherwise indistinguishable.
 

@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-10-25
+
+### Changed
+
+- `Esc` asks before quitting: `Esc` again quits, `Backspace` returns. `q` still
+  quits at once.
+
+### Fixed
+
+- Size bars and the key help rendered boxed question marks in Windows console
+  fonts. Bars now use only `█` and `▌` (half-cell resolution), and the help
+  spells out `enter` and `backspace`.
+
 ## [0.2.0] - 2026-07-26
 
 ### Added

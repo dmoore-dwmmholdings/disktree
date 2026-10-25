@@ -13,7 +13,6 @@ use crate::index::ScanProgress;
 
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const BAR_WIDTH: usize = 10;
-const PARTIAL_BLOCKS: [char; 8] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let [header_area, table_area, footer_area] = Layout::vertical([
@@ -30,6 +29,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     match &app.mode {
         Mode::Confirm { permanent, targets } => draw_confirm(f, app, *permanent, targets),
         Mode::Deleting { count } => draw_deleting(f, *count),
+        Mode::ConfirmQuit => draw_confirm_quit(f),
         Mode::Browse => {}
     }
 }
@@ -162,7 +162,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     };
     f.render_widget(Paragraph::new(info), info_area);
 
-    let keys = " ↑↓ move  ⏎ open  ⌫ up  space mark  c clear  d → recycle bin  D delete forever  r rescan  q quit";
+    let keys = " ↑↓ move  enter open  backspace up  space mark  c clear  d → recycle bin  D delete forever  r rescan  q quit";
     f.render_widget(
         Paragraph::new(keys).style(Style::new().fg(Color::DarkGray)),
         keys_area,
@@ -245,6 +245,17 @@ fn draw_deleting(f: &mut Frame, count: usize) {
     );
 }
 
+fn draw_confirm_quit(f: &mut Frame) {
+    let area = centered(40, 3, f.area());
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new("Esc to quit, Backspace to go back")
+            .centered()
+            .block(Block::bordered().title(" Quit? ")),
+        area,
+    );
+}
+
 /// Which scanner is running, since the two report progress in different units.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ScanMode {
@@ -319,13 +330,14 @@ pub fn draw_scanning(
     );
 }
 
+/// Half-cell resolution: the eighth blocks (U+2589–U+258F) are missing from
+/// common Windows console fonts and render as tofu, but █ and ▌ are in CP437.
 fn bar(pct: f64) -> String {
-    let eighths = (pct / 100.0 * BAR_WIDTH as f64 * 8.0).round() as usize;
-    let full = (eighths / 8).min(BAR_WIDTH);
-    let remainder = eighths % 8;
+    let halves = (pct / 100.0 * BAR_WIDTH as f64 * 2.0).round() as usize;
+    let full = (halves / 2).min(BAR_WIDTH);
     let mut s = "█".repeat(full);
-    if full < BAR_WIDTH && remainder > 0 {
-        s.push(PARTIAL_BLOCKS[remainder]);
+    if full < BAR_WIDTH && halves % 2 == 1 {
+        s.push('▌');
     }
     while s.chars().count() < BAR_WIDTH {
         s.push(' ');
@@ -367,6 +379,7 @@ mod tests {
         assert_eq!(bar(0.0), "          ");
         assert_eq!(bar(100.0), "██████████");
         assert_eq!(bar(50.0), "█████     ");
+        assert_eq!(bar(55.0), "█████▌    ");
     }
 
     #[test]

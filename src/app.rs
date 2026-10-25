@@ -15,6 +15,7 @@ pub enum Mode {
     Deleting {
         count: usize,
     },
+    ConfirmQuit,
 }
 
 pub struct App {
@@ -105,6 +106,11 @@ impl App {
             Mode::Browse => self.on_key_browse(key),
             Mode::Confirm { .. } => self.on_key_confirm(key),
             Mode::Deleting { .. } => {}
+            Mode::ConfirmQuit => match key.code {
+                KeyCode::Esc => self.quit = true,
+                KeyCode::Backspace => self.mode = Mode::Browse,
+                _ => {}
+            },
         }
     }
 
@@ -114,7 +120,8 @@ impl App {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.quit = true;
             }
-            KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
+            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Esc => self.mode = Mode::ConfirmQuit,
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::PageUp => self.move_selection(-20),
