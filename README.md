@@ -15,6 +15,7 @@ A disk usage analyzer for your terminal, in the spirit of [WizTree](https://disk
 - **Two scanners**: a parallel directory walk that works anywhere, and on elevated NTFS an MFT reader that streams the whole volume's metadata in one pass
 - **Live progress**, and a size-sorted view of every directory
 - **Marks and safe deletion**: mark any number of entries, then send them to the **Recycle Bin** or delete permanently, always behind a confirmation that lists the **full path** of everything about to go
+- Deletes run in the background with a progress bar each, so you can keep browsing and start more
 - Sizes update in place after a delete — no rescan needed
 - Unreadable directories are counted and reported, never fatal
 - Constant-cost rendering: a directory with 100,000 entries draws as fast as one with 10
@@ -67,6 +68,8 @@ disktree --no-elevate        # do not relaunch as administrator
 | `Esc` | Ask to quit (`Esc` again quits, `Backspace` returns) |
 
 Marks persist while you navigate, so you can gather things from several directories and delete them in one pass. The footer shows how many are marked and their combined size; the confirmation dialog lists full paths, because two folders named `bin` are otherwise indistinguishable.
+
+A confirmed delete runs in the background, with one progress line per delete above the footer. Items being deleted are greyed out and cannot be deleted again. A permanent delete advances file by file; a Recycle Bin delete advances one item at a time, since Windows recycles each item in a single call. While deletes run, `q` asks before quitting (quitting stops them part-way) and `r` waits for them to finish.
 
 ## Understanding the numbers
 

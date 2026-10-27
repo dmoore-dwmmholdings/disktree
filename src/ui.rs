@@ -15,23 +15,59 @@ const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '�
 const BAR_WIDTH: usize = 10;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
-    let [header_area, table_area, footer_area] = Layout::vertical([
+    let [header_area, table_area, jobs_area, footer_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
+        Constraint::Length(app.jobs.len() as u16),
         Constraint::Length(2),
     ])
     .areas(f.area());
 
     draw_header(f, app, header_area);
     draw_table(f, app, table_area);
+    draw_jobs(f, app, jobs_area);
     draw_footer(f, app, footer_area);
 
     match &app.mode {
         Mode::Confirm { permanent, targets } => draw_confirm(f, app, *permanent, targets),
-        Mode::Deleting { count } => draw_deleting(f, *count),
-        Mode::ConfirmQuit => draw_confirm_quit(f),
+        Mode::ConfirmQuit => draw_confirm_quit(f, app.jobs.len()),
         Mode::Browse => {}
     }
+}
+
+/// One progress line per running delete.
+fn draw_jobs(f: &mut Frame, app: &App, area: Rect) {
+    let lines: Vec<Line> = app
+        .jobs
+        .iter()
+        .map(|job| {
+            let pct = job.fraction() * 100.0;
+            let (verb, color) = if job.permanent {
+                ("Deleting ", Color::Red)
+            } else {
+                ("Recycling", Color::Yellow)
+            };
+            let more = match job.targets.len() {
+                1 => String::new(),
+                n => format!(" + {} more", n - 1),
+            };
+            let done = job.done_bytes.load(Ordering::Relaxed).min(job.total_bytes);
+            let head = format!(
+                " {verb} {pct:>3.0}%  {} / {}  ",
+                format_size(done),
+                format_size(job.total_bytes)
+            );
+            let room = (area.width as usize)
+                .saturating_sub(head.chars().count() + BAR_WIDTH + 3 + more.len());
+            Line::from(vec![
+                Span::styled(bar(pct), Style::new().fg(color).bg(Color::DarkGray)),
+                Span::raw(head),
+                Span::raw(truncate_left(&job.label, room)),
+                Span::raw(more),
+            ])
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -90,7 +126,9 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
             let row = Row::new(vec![
                 mark_cell, size_cell, pct_cell, bar_cell, items_cell, name_cell,
             ]);
-            if marked {
+            if app.is_deleting(idx) {
+                row.style(Style::new().fg(Color::DarkGray))
+            } else if marked {
                 row.style(Style::new().fg(Color::Yellow))
             } else {
                 row
@@ -234,22 +272,19 @@ fn draw_confirm(f: &mut Frame, app: &App, permanent: bool, targets: &[usize]) {
     );
 }
 
-fn draw_deleting(f: &mut Frame, count: usize) {
-    let area = centered(40, 3, f.area());
+fn draw_confirm_quit(f: &mut Frame, running: usize) {
+    let mut lines = Vec::new();
+    if running > 0 {
+        lines.push(
+            Line::from(format!("{running} delete(s) still running will stop"))
+                .style(Style::new().fg(Color::Red)),
+        );
+    }
+    lines.push(Line::from("Esc to quit, Backspace to go back"));
+    let area = centered(44, lines.len() as u16 + 2, f.area());
     f.render_widget(Clear, area);
     f.render_widget(
-        Paragraph::new(format!("Deleting {count} item(s)…"))
-            .centered()
-            .block(Block::bordered().border_style(Style::new().fg(Color::Yellow))),
-        area,
-    );
-}
-
-fn draw_confirm_quit(f: &mut Frame) {
-    let area = centered(40, 3, f.area());
-    f.render_widget(Clear, area);
-    f.render_widget(
-        Paragraph::new("Esc to quit, Backspace to go back")
+        Paragraph::new(lines)
             .centered()
             .block(Block::bordered().title(" Quit? ")),
         area,
@@ -522,6 +557,43 @@ mod tests {
             }
         }
         assert!(found, "no bar glyphs rendered at all");
+    }
+
+    /// Each running delete gets its own progress line above the footer.
+    #[test]
+    fn one_progress_line_per_job() {
+        let root = std::env::temp_dir().join(format!("disktree_ui_jobs_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("one"), [0u8; 10]).unwrap();
+        fs::write(root.join("two"), [0u8; 20]).unwrap();
+        let mut app = crate::app::App::new(scan(root.clone(), &ScanProgress::default()));
+        let (a, b) = (app.rows[0], app.rows[1]);
+        app.start_delete(vec![a], true);
+        app.start_delete(vec![b], true);
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let line =
+            |y: u16| -> String { (0..100).map(|x| buf[(x, y)].symbol().to_string()).collect() };
+        // Footer is the last two lines; the jobs sit directly above it.
+        assert!(
+            line(8).contains("Deleting") && line(8).contains("two"),
+            "{:?}",
+            line(8)
+        );
+        assert!(
+            line(9).contains("Deleting") && line(9).contains("one"),
+            "{:?}",
+            line(9)
+        );
+
+        while !app.jobs.is_empty() {
+            std::thread::yield_now();
+            app.poll_jobs();
+        }
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

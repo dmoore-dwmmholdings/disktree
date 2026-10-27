@@ -1,5 +1,10 @@
 use std::collections::HashSet;
 use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread::{self, JoinHandle};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
@@ -12,10 +17,33 @@ pub enum Mode {
         permanent: bool,
         targets: Vec<usize>,
     },
-    Deleting {
-        count: usize,
-    },
     ConfirmQuit,
+}
+
+/// A confirmed delete running on its own thread, so browsing continues.
+pub struct DeleteJob {
+    pub targets: Vec<usize>,
+    pub permanent: bool,
+    /// Scanned size of all targets: the denominator of the progress bar.
+    pub total_bytes: u64,
+    /// Bytes deleted so far, written by the worker.
+    pub done_bytes: Arc<AtomicU64>,
+    /// Path of the largest target, for the progress line.
+    pub label: String,
+    handle: JoinHandle<Vec<Outcome>>,
+}
+
+impl DeleteJob {
+    pub fn fraction(&self) -> f64 {
+        let done = self.done_bytes.load(Ordering::Relaxed);
+        (done as f64 / self.total_bytes.max(1) as f64).min(1.0)
+    }
+}
+
+enum Outcome {
+    Deleted,
+    Vanished,
+    Failed(String),
 }
 
 pub struct App {
@@ -32,9 +60,8 @@ pub struct App {
     pub mode: Mode,
     pub status: Option<String>,
     pub table_state: TableState,
-    /// Set when a delete is confirmed; executed by the main loop after one
-    /// "Deleting…" frame has been drawn.
-    pub pending_delete: Option<(Vec<usize>, bool)>,
+    /// Deletes in flight, oldest first.
+    pub jobs: Vec<DeleteJob>,
     pub quit: bool,
     pub rescan: bool,
 }
@@ -57,7 +84,7 @@ impl App {
             mode: Mode::Browse,
             status,
             table_state: TableState::default(),
-            pending_delete: None,
+            jobs: Vec::new(),
             quit: false,
             rescan: false,
         };
@@ -105,7 +132,6 @@ impl App {
         match self.mode {
             Mode::Browse => self.on_key_browse(key),
             Mode::Confirm { .. } => self.on_key_confirm(key),
-            Mode::Deleting { .. } => {}
             Mode::ConfirmQuit => match key.code {
                 KeyCode::Esc => self.quit = true,
                 KeyCode::Backspace => self.mode = Mode::Browse,
@@ -120,6 +146,8 @@ impl App {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.quit = true;
             }
+            // Quitting kills the delete threads, so ask first while any run.
+            KeyCode::Char('q') if !self.jobs.is_empty() => self.mode = Mode::ConfirmQuit,
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Esc => self.mode = Mode::ConfirmQuit,
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
@@ -139,6 +167,10 @@ impl App {
             }
             KeyCode::Char('d') => self.request_delete(false),
             KeyCode::Char('D') => self.request_delete(true),
+            // A rescan replaces the tree the running jobs report into.
+            KeyCode::Char('r') if !self.jobs.is_empty() => {
+                self.status = Some("Wait for deletes to finish before rescanning".to_owned());
+            }
             KeyCode::Char('r') => self.rescan = true,
             _ => {}
         }
@@ -150,10 +182,7 @@ impl App {
                 if let Mode::Confirm { permanent, targets } =
                     std::mem::replace(&mut self.mode, Mode::Browse)
                 {
-                    self.mode = Mode::Deleting {
-                        count: targets.len(),
-                    };
-                    self.pending_delete = Some((targets, permanent));
+                    self.start_delete(targets, permanent);
                 }
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q') => {
@@ -220,14 +249,70 @@ impl App {
             true
         });
 
+        // Already on its way out in another job.
+        targets.retain(|&t| !self.is_deleting(t));
+
         if targets.is_empty() {
+            if !self.jobs.is_empty() {
+                self.status = Some("Already being deleted".to_owned());
+            }
             return;
         }
         targets.sort_unstable_by(|&a, &b| self.tree.nodes[b].size.cmp(&self.tree.nodes[a].size));
         self.mode = Mode::Confirm { permanent, targets };
     }
 
-    pub fn perform_delete(&mut self, targets: &[usize], permanent: bool) {
+    /// True if `idx` or one of its ancestors is a target of a running job.
+    pub fn is_deleting(&self, idx: usize) -> bool {
+        let mut node = Some(idx);
+        while let Some(i) = node {
+            if self.jobs.iter().any(|j| j.targets.contains(&i)) {
+                return true;
+            }
+            node = self.tree.nodes[i].parent;
+        }
+        false
+    }
+
+    /// Start deleting `targets` on a background thread.
+    pub fn start_delete(&mut self, targets: Vec<usize>, permanent: bool) {
+        let items: Vec<(PathBuf, bool, u64)> = targets
+            .iter()
+            .map(|&t| {
+                let n = &self.tree.nodes[t];
+                (self.tree.path_of(t), n.is_dir, n.size)
+            })
+            .collect();
+        for t in &targets {
+            self.marked.remove(t);
+        }
+        let done_bytes = Arc::new(AtomicU64::new(0));
+        let done = Arc::clone(&done_bytes);
+        self.jobs.push(DeleteJob {
+            total_bytes: items.iter().map(|i| i.2).sum(),
+            label: items[0].0.display().to_string(),
+            handle: thread::spawn(move || delete_items(&items, permanent, &done)),
+            done_bytes,
+            targets,
+            permanent,
+        });
+    }
+
+    /// Apply every finished job to the tree. Called once per frame.
+    pub fn poll_jobs(&mut self) {
+        let mut i = 0;
+        while i < self.jobs.len() {
+            if self.jobs[i].handle.is_finished() {
+                let job = self.jobs.remove(i);
+                let outcomes = job.handle.join().unwrap_or_default();
+                self.finish_delete(&job.targets, job.permanent, outcomes);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    fn finish_delete(&mut self, targets: &[usize], permanent: bool, outcomes: Vec<Outcome>) {
         let mut deleted = 0usize;
         let mut freed = 0u64;
         let mut failed = 0usize;
@@ -236,54 +321,30 @@ impl App {
         let mut vanished = 0usize;
         let mut partial = false;
 
-        for &t in targets {
-            let path = self.tree.path_of(t);
-
-            // The tree can be minutes old on a large scan, so confirm the target
-            // still exists rather than reporting a phantom deletion.
-            if fs::symlink_metadata(&path).is_err() {
-                vanished += 1;
-                self.tree.remove(t);
-                continue;
-            }
-
-            let result = if permanent {
-                if self.tree.nodes[t].is_dir {
-                    fs::remove_dir_all(&path)
-                } else {
-                    fs::remove_file(&path)
-                }
-                .map_err(|e| e.to_string())
-            } else {
-                trash::delete(&path).map_err(explain_trash_error)
-            };
-
-            match result {
-                Ok(()) => {
+        for (&t, outcome) in targets.iter().zip(outcomes) {
+            match outcome {
+                Outcome::Vanished => vanished += 1,
+                Outcome::Deleted => {
                     deleted += 1;
                     freed += self.tree.nodes[t].size;
-                    self.tree.remove(t);
                 }
-                Err(e) => {
-                    // An error does not mean nothing happened: remove_dir_all can
-                    // delete most of a tree before hitting an open file, and
-                    // IFileOperation can recycle some items and abort others. If
-                    // the target is gone, treat it as deleted; if it survives, its
-                    // recorded size is now unreliable and so are its ancestors'.
-                    if fs::symlink_metadata(&path).is_err() {
-                        deleted += 1;
-                        freed += self.tree.nodes[t].size;
-                        self.tree.remove(t);
-                    } else {
-                        failed += 1;
-                        if self.tree.nodes[t].is_dir {
-                            partial = true;
-                        }
-                        if first_err.is_none() {
-                            first_err = Some(e);
-                        }
+                Outcome::Failed(e) => {
+                    // The target survives, so its recorded size is now
+                    // unreliable and so are its ancestors'.
+                    failed += 1;
+                    if self.tree.nodes[t].is_dir {
+                        partial = true;
                     }
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                    continue;
                 }
+            }
+            // Another job may have removed an ancestor first; removing again
+            // would subtract this node's size from the ancestors twice.
+            if !self.tree.is_gone(t) {
+                self.tree.remove(t);
             }
         }
 
@@ -315,8 +376,74 @@ impl App {
             msg.push_str(" — partially deleted, sizes may be stale; press r to rescan");
         }
         self.status = Some(msg);
-        self.mode = Mode::Browse;
     }
+}
+
+/// Delete each item, adding bytes to `done` as they go. Runs off the UI thread.
+fn delete_items(items: &[(PathBuf, bool, u64)], permanent: bool, done: &AtomicU64) -> Vec<Outcome> {
+    items
+        .iter()
+        .map(|(path, is_dir, size)| {
+            // The tree can be minutes old on a large scan, so confirm the target
+            // still exists rather than reporting a phantom deletion.
+            if fs::symlink_metadata(path).is_err() {
+                return Outcome::Vanished;
+            }
+
+            let result = if permanent {
+                if *is_dir {
+                    remove_dir_counted(path, done)
+                } else {
+                    fs::remove_file(path).inspect(|()| {
+                        done.fetch_add(*size, Ordering::Relaxed);
+                    })
+                }
+                .map_err(|e| e.to_string())
+            } else {
+                // The Recycle Bin takes each item in one opaque call, so its
+                // progress moves a whole item at a time.
+                trash::delete(path)
+                    .map_err(explain_trash_error)
+                    .inspect(|()| {
+                        done.fetch_add(*size, Ordering::Relaxed);
+                    })
+            };
+
+            match result {
+                Ok(()) => Outcome::Deleted,
+                // An error does not mean nothing happened: remove_dir_all can
+                // delete most of a tree before hitting an open file, and
+                // IFileOperation can recycle some items and abort others. If the
+                // target is gone, treat it as deleted.
+                Err(_) if fs::symlink_metadata(path).is_err() => Outcome::Deleted,
+                Err(e) => Outcome::Failed(e),
+            }
+        })
+        .collect()
+}
+
+/// `fs::remove_dir_all`, but counting each file's bytes into `done` as it goes.
+///
+/// Errors on the way down are ignored: the closing `remove_dir_all` retries what
+/// is left (read-only files, directory junctions) and its error is the one that
+/// counts. Only real directories are entered, never links.
+fn remove_dir_counted(dir: &Path, done: &AtomicU64) -> io::Result<()> {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                let _ = remove_dir_counted(&entry.path(), done);
+            } else {
+                let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                if fs::remove_file(entry.path()).is_ok() {
+                    done.fetch_add(len, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+    fs::remove_dir_all(dir)
 }
 
 /// Turn the one Recycle Bin failure users actually hit into something actionable.
@@ -462,7 +589,8 @@ mod tests {
         let root_size_before = app.tree.nodes[app.tree.root].size;
 
         std::fs::remove_file(app.tree.path_of(a)).unwrap();
-        app.perform_delete(&[a], true);
+        app.start_delete(vec![a], true);
+        wait_jobs(&mut app);
 
         assert!(app.tree.is_gone(a), "vanished target still in tree");
         assert_eq!(
@@ -481,7 +609,8 @@ mod tests {
         let b = find_node(&app, "bin", "beta");
         let before = app.tree.nodes[app.tree.root].size;
 
-        app.perform_delete(&[b], true);
+        app.start_delete(vec![b], true);
+        wait_jobs(&mut app);
 
         assert!(app.tree.is_gone(b));
         assert_eq!(app.tree.nodes[app.tree.root].size, before - 400);
@@ -492,5 +621,69 @@ mod tests {
                 .exists()
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn wait_jobs(app: &mut App) {
+        while !app.jobs.is_empty() {
+            std::thread::yield_now();
+            app.poll_jobs();
+        }
+    }
+
+    /// Two jobs in flight at once, one of them inside the other: both must
+    /// finish, and the ancestors must lose each byte exactly once.
+    #[test]
+    fn concurrent_jobs_including_nested_targets() {
+        let (root, mut app) = same_name_fixture("nested");
+        let alpha_bin = find_node(&app, "bin", "alpha");
+        let alpha = app.tree.nodes[alpha_bin].parent.unwrap();
+        let beta_bin = find_node(&app, "bin", "beta");
+        let before = app.tree.nodes[app.tree.root].size;
+
+        app.start_delete(vec![alpha_bin], true);
+        app.start_delete(vec![alpha, beta_bin], true);
+        assert_eq!(app.jobs.len(), 2);
+        assert!(app.is_deleting(alpha_bin) && app.is_deleting(beta_bin));
+        wait_jobs(&mut app);
+
+        assert!(app.tree.is_gone(alpha) && app.tree.is_gone(beta_bin));
+        assert_eq!(app.tree.nodes[app.tree.root].size, before - 700);
+        assert!(!root.join("alpha").exists());
+        assert!(!root.join("beta").join("bin").exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Items already in a running job are not offered for deletion again.
+    #[test]
+    fn request_skips_targets_already_being_deleted() {
+        let (root, mut app) = same_name_fixture("skip");
+        let a = find_node(&app, "bin", "alpha");
+        let b = find_node(&app, "bin", "beta");
+        app.start_delete(vec![a], true);
+        app.marked.extend([a, b]);
+        app.request_delete(true);
+        match &app.mode {
+            Mode::Confirm { targets, .. } => assert_eq!(targets, &vec![b]),
+            _ => panic!("expected confirm dialog"),
+        }
+        wait_jobs(&mut app);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The progress counter must reach the bytes actually removed.
+    #[test]
+    fn remove_dir_counted_reports_bytes() {
+        let dir = std::env::temp_dir().join(format!("disktree_count_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("a").join("b")).unwrap();
+        fs::write(dir.join("top"), [0u8; 100]).unwrap();
+        fs::write(dir.join("a").join("mid"), [0u8; 200]).unwrap();
+        fs::write(dir.join("a").join("b").join("deep"), [0u8; 300]).unwrap();
+
+        let done = AtomicU64::new(0);
+        remove_dir_counted(&dir, &done).unwrap();
+
+        assert!(!dir.exists());
+        assert_eq!(done.load(Ordering::Relaxed), 600);
     }
 }

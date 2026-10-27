@@ -328,14 +328,8 @@ fn run_scan(
 
 fn run_browse(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     loop {
+        app.poll_jobs();
         terminal.draw(|f| ui::draw(f, app))?;
-
-        // Confirmed deletes run here so the "Deleting…" frame above is visible
-        // while the (possibly slow) filesystem operations happen.
-        if let Some((targets, permanent)) = app.pending_delete.take() {
-            app.perform_delete(&targets, permanent);
-            continue;
-        }
 
         if event::poll(Duration::from_millis(200))?
             && let Event::Key(key) = event::read()?

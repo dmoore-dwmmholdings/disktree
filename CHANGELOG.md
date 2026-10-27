@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-10-27
+
+### Changed
+
+- Deletes run in the background with a progress bar each, so browsing
+  continues and several deletes can run at once. Items being deleted are greyed
+  out and cannot be deleted again. While any run, `q` asks before quitting and
+  `r` refuses to rescan.
+
 ## [0.2.1] - 2026-10-25
 
 ### Changed
